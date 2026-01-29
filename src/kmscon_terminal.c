@@ -93,11 +93,11 @@ struct kmscon_terminal {
 
 	struct kmscon_font_attr font_attr;
 	struct kmscon_font *font;
+	struct kmscon_font *bold_font;
 
 	bool redraw_pending;
 	bool redraw_scheduled;
 	struct ev_timer *redraw_timer;
-	struct kmscon_font *bold_font;
 
 	struct kmscon_pointer pointer;
 };
