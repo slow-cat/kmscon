@@ -190,6 +190,9 @@ static void schedule_redraw(struct kmscon_terminal *term)
 	if (!term->awake)
 		return;
 
+	if (term->redraw_pending)
+		return;
+
 	term->redraw_pending = true;
 
 	if (!term->redraw_scheduled) {
@@ -572,7 +575,17 @@ static void input_event(struct uterm_input *input, struct uterm_input_key_event 
 	    !kmscon_session_get_foreground(term->session))
 		return;
 
-	// reset mouse selection on keypress
+	/* Skip processing for modifier-only keys (no actual key symbol) */
+	if (ev->num_syms == 0)
+		return;
+
+	/* Fast path: skip expensive grab matching if no modifiers pressed */
+	if (ev->mods == 0) {
+		/* No shortcuts possible without modifiers - handle normal input */
+		goto handle_normal_input;
+	}
+
+	// reset mouse selection on keypress with modifiers
 	tsm_screen_selection_reset(term->console);
 
 	if (conf_grab_matches(term->conf->grab_scroll_up, ev->mods, ev->num_syms, ev->keysyms)) {
@@ -629,6 +642,10 @@ static void input_event(struct uterm_input *input, struct uterm_input_key_event 
 		ev->handled = true;
 		return;
 	}
+
+handle_normal_input:
+	// reset mouse selection on normal keypress
+	tsm_screen_selection_reset(term->console);
 
 	/* TODO: xkbcommon supports multiple keysyms, but it is currently
 	 * unclear how this feature will be used. There is no keymap, which
@@ -741,14 +758,22 @@ static void pointer_event(struct uterm_input *input, struct uterm_input_pointer_
 			  void *data)
 {
 	struct kmscon_terminal *term = data;
+	unsigned int old_posx, old_posy;
 
 	if (ev->event == UTERM_MOVED) {
 		term->pointer.x = ev->pointer_x;
 		term->pointer.y = ev->pointer_y;
 
+		old_posx = term->pointer.posx;
+		old_posy = term->pointer.posy;
 		coord_to_cell(term, term->pointer.x, term->pointer.y, &term->pointer.posx,
 			      &term->pointer.posy);
 		term->pointer.visible = true;
+
+		/* Early handling for selection updates - avoid redundant processing */
+		if (term->pointer.select && (old_posx != term->pointer.posx || old_posy != term->pointer.posy)) {
+			update_selection(term->console, term->pointer.posx, term->pointer.posy);
+		}
 	}
 
 	if (tsm_vte_get_mouse_mode(term->vte) != TSM_MOUSE_TRACK_DISABLE &&
@@ -761,8 +786,7 @@ static void pointer_event(struct uterm_input *input, struct uterm_input_pointer_
 	default:
 		break;
 	case UTERM_MOVED:
-		if (term->pointer.select)
-			update_selection(term->console, term->pointer.posx, term->pointer.posy);
+		/* Already handled above */
 		break;
 	case UTERM_BUTTON:
 		handle_pointer_button(term, ev);
