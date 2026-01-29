@@ -206,7 +206,7 @@ if enable_renderer_gltex
       embed_gen.process('text_gltex_atlas.frag', extra_args: shader_regex),
     ],
     name_prefix: '',
-    dependencies: [libtsm_deps, glesv2_deps, shl_deps, shl_gl_deps],
+    dependencies: [libtsm_deps, glesv2_deps, egl_deps, shl_deps, shl_gl_deps],
     install: true,
     install_dir: moduledir,
   )

@@ -38,6 +38,7 @@
 
 #define GL_GLEXT_PROTOTYPES
 
+#include <EGL/egl.h>
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 #include <errno.h>
@@ -132,6 +133,11 @@ struct gltex {
 	GLuint offscreen_texture;
 	float bg_r, bg_g, bg_b;
 	bool need_clear;
+	
+	/* Function pointer for glBlitFramebuffer (dynamically loaded) */
+	void (*glBlitFramebufferFunc)(GLint, GLint, GLint, GLint,
+	                               GLint, GLint, GLint, GLint,
+	                               GLbitfield, GLenum);
 
 	/* Cell state tracking for differential rendering */
 	struct gltex_cell *prev_cells;
@@ -276,6 +282,29 @@ static int gltex_set(struct kmscon_text *txt)
 		log_warning("your GL implementation does not support GL_EXT_unpack_subimage, "
 			    "glyph-rendering may be slower than usual");
 	}
+	
+	/* Load glBlitFramebuffer function for FBO support */
+	gt->glBlitFramebufferFunc = NULL;
+	if (ext) {
+		if (strstr(ext, "GL_ANGLE_framebuffer_blit")) {
+			gt->glBlitFramebufferFunc = (void*)eglGetProcAddress("glBlitFramebufferANGLE");
+			if (gt->glBlitFramebufferFunc)
+				log_info("glBlitFramebufferANGLE loaded (ANGLE)");
+		}
+		if (!gt->glBlitFramebufferFunc && strstr(ext, "GL_NV_framebuffer_blit")) {
+			gt->glBlitFramebufferFunc = (void*)eglGetProcAddress("glBlitFramebufferNV");
+			if (gt->glBlitFramebufferFunc)
+				log_info("glBlitFramebufferNV loaded (NV)");
+		}
+	}
+	if (!gt->glBlitFramebufferFunc) {
+		gt->glBlitFramebufferFunc = (void*)eglGetProcAddress("glBlitFramebuffer");
+		if (gt->glBlitFramebufferFunc) {
+			log_info("glBlitFramebuffer loaded (core GLES3)");
+		} else {
+			log_warning("No glBlitFramebuffer support, FBO optimization disabled");
+		}
+	}
 
 	/* Update screen dimensions */
 	unsigned int new_sw = uterm_display_get_width(txt->disp);
@@ -301,6 +330,12 @@ static int gltex_set(struct kmscon_text *txt)
 
 	/* Create or recreate FBO if needed */
 	if (!gt->offscreen_fbo || size_changed) {
+		/* Only create FBO if we have blit support */
+		if (!gt->glBlitFramebufferFunc) {
+			log_info("FBO disabled: glBlitFramebuffer not available");
+			goto skip_fbo;
+		}
+		
 		/* Delete old FBO if it exists */
 		if (gt->offscreen_fbo) {
 			glDeleteFramebuffers(1, &gt->offscreen_fbo);
@@ -342,6 +377,7 @@ static int gltex_set(struct kmscon_text *txt)
 		gt->need_clear = true;
 	}
 
+skip_fbo:
 	return 0;
 
 err_shader:
@@ -991,13 +1027,17 @@ static int gltex_render(struct kmscon_text *txt)
 		glDisableVertexAttribArray(2);
 		glDisableVertexAttribArray(3);
 
-		/* Blit FBO to screen (uterm no longer clears) */
-		glBindFramebuffer(GL_READ_FRAMEBUFFER_NV, gt->offscreen_fbo);
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER_NV, 0);
-		glBlitFramebufferNV(0, 0, gt->sw, gt->sh,
-				    0, 0, gt->sw, gt->sh,
-				    GL_COLOR_BUFFER_BIT, GL_NEAREST);
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		/* Blit FBO to screen using dynamically loaded function */
+		if (gt->glBlitFramebufferFunc) {
+			glBindFramebuffer(GL_READ_FRAMEBUFFER_NV, gt->offscreen_fbo);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER_NV, 0);
+			gt->glBlitFramebufferFunc(0, 0, gt->sw, gt->sh,
+						   0, 0, gt->sw, gt->sh,
+						   GL_COLOR_BUFFER_BIT, GL_NEAREST);
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		} else {
+			log_warning("FBO enabled but no blit function - should not happen");
+		}
 
 		if (gl_has_error(gt->shader)) {
 			log_warning("rendering console caused OpenGL errors");
@@ -1048,14 +1088,9 @@ static int gltex_render(struct kmscon_text *txt)
 	glDisableVertexAttribArray(2);
 	glDisableVertexAttribArray(3);
 
-	/* If using FBO, blit to screen */
+	/* If using FBO, blit to screen - should not reach here in fallback path */
 	if (gt->offscreen_fbo) {
-		glBindFramebuffer(GL_READ_FRAMEBUFFER_NV, gt->offscreen_fbo);
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER_NV, 0);
-		glBlitFramebufferNV(0, 0, gt->sw, gt->sh,
-				    0, 0, gt->sw, gt->sh,
-				    GL_COLOR_BUFFER_BIT, GL_NEAREST);
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		log_warning("FBO rendering in fallback path - should not happen");
 	}
 
 	if (gl_has_error(gt->shader)) {
