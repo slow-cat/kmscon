@@ -93,6 +93,10 @@ struct kmscon_terminal {
 
 	struct kmscon_font_attr font_attr;
 	struct kmscon_font *font;
+
+	bool redraw_pending;
+	bool redraw_scheduled;
+	struct ev_timer *redraw_timer;
 	struct kmscon_font *bold_font;
 
 	struct kmscon_pointer pointer;
@@ -162,6 +166,43 @@ static void redraw_screen(struct screen *scr)
 		scr->pending = true;
 	else
 		do_redraw_screen(scr);
+}
+
+/* Forward declaration */
+static void redraw_all(struct kmscon_terminal *term);
+
+static void redraw_timer_cb(struct ev_timer *timer, uint64_t exp, void *data)
+{
+	struct kmscon_terminal *term = data;
+
+	term->redraw_scheduled = false;
+
+	if (term->redraw_pending && term->awake) {
+		term->redraw_pending = false;
+		redraw_all(term);
+	}
+}
+
+static void schedule_redraw(struct kmscon_terminal *term)
+{
+	struct itimerspec spec;
+
+	if (!term->awake)
+		return;
+
+	term->redraw_pending = true;
+
+	if (!term->redraw_scheduled) {
+		term->redraw_scheduled = true;
+		
+		/* Schedule redraw after 16.6ms (60Hz) */
+		spec.it_value.tv_sec = 0;
+		spec.it_value.tv_nsec = 16666666; /* 16.6ms */
+		spec.it_interval.tv_sec = 0;
+		spec.it_interval.tv_nsec = 0;
+		
+		ev_timer_update(term->redraw_timer, &spec);
+	}
 }
 
 static void redraw_all(struct kmscon_terminal *term)
@@ -239,6 +280,10 @@ static void redraw_all_test(struct kmscon_terminal *term)
 
 	if (!term->awake)
 		return;
+
+	/* Reset pending flag since we do immediate redraw */
+	term->redraw_pending = false;
+	term->redraw_scheduled = false;
 
 	shl_dlist_for_each(iter, &term->screens)
 	{
@@ -324,7 +369,7 @@ static void terminal_update_size_notify(struct kmscon_terminal *term)
 	if (terminal_update_size(term)) {
 		tsm_screen_resize(term->console, term->min_cols, term->min_rows);
 		kmscon_pty_resize(term->pty, term->min_cols, term->min_rows);
-		redraw_all(term);
+		schedule_redraw(term);
 	}
 }
 
@@ -532,25 +577,25 @@ static void input_event(struct uterm_input *input, struct uterm_input_key_event 
 
 	if (conf_grab_matches(term->conf->grab_scroll_up, ev->mods, ev->num_syms, ev->keysyms)) {
 		tsm_screen_sb_up(term->console, 1);
-		redraw_all(term);
+		schedule_redraw(term);
 		ev->handled = true;
 		return;
 	}
 	if (conf_grab_matches(term->conf->grab_scroll_down, ev->mods, ev->num_syms, ev->keysyms)) {
 		tsm_screen_sb_down(term->console, 1);
-		redraw_all(term);
+		schedule_redraw(term);
 		ev->handled = true;
 		return;
 	}
 	if (conf_grab_matches(term->conf->grab_page_up, ev->mods, ev->num_syms, ev->keysyms)) {
 		tsm_screen_sb_page_up(term->console, 1);
-		redraw_all(term);
+		schedule_redraw(term);
 		ev->handled = true;
 		return;
 	}
 	if (conf_grab_matches(term->conf->grab_page_down, ev->mods, ev->num_syms, ev->keysyms)) {
 		tsm_screen_sb_page_down(term->console, 1);
-		redraw_all(term);
+		schedule_redraw(term);
 		ev->handled = true;
 		return;
 	}
@@ -594,7 +639,7 @@ static void input_event(struct uterm_input *input, struct uterm_input_key_event 
 	if (tsm_vte_handle_keyboard(term->vte, ev->keysyms[0], ev->ascii, ev->mods,
 				    ev->codepoints[0])) {
 		tsm_screen_sb_reset(term->console);
-		redraw_all(term);
+		/* Redraw will happen when PTY echoes back - no need to redraw here */
 		ev->handled = true;
 	}
 }
@@ -730,7 +775,7 @@ static void pointer_event(struct uterm_input *input, struct uterm_input_pointer_
 			tsm_screen_sb_down(term->console, 3);
 		break;
 	case UTERM_SYNC:
-		redraw_all(term);
+		schedule_redraw(term);
 		break;
 	case UTERM_HIDE_TIMEOUT:
 		tsm_screen_selection_reset(term->console);
@@ -771,7 +816,7 @@ static int terminal_open(struct kmscon_terminal *term)
 	term->opened = true;
 
 	update_pointer_max_all(term);
-	redraw_all(term);
+	schedule_redraw(term);
 	return 0;
 }
 
@@ -789,6 +834,7 @@ static void terminal_destroy(struct kmscon_terminal *term)
 	rm_all_screens(term);
 	uterm_input_unregister_pointer_cb(term->input, pointer_event, term);
 	uterm_input_unregister_key_cb(term->input, input_event, term);
+	ev_eloop_rm_timer(term->redraw_timer);
 	ev_eloop_rm_fd(term->ptyfd);
 	kmscon_pty_unref(term->pty);
 	kmscon_font_unref(term->bold_font);
@@ -841,7 +887,7 @@ static void pty_input(struct kmscon_pty *pty, const char *u8, size_t len, void *
 		terminal_open(term);
 	} else {
 		tsm_vte_input(term->vte, u8, len);
-		redraw_all(term);
+		schedule_redraw(term);
 	}
 }
 
@@ -930,10 +976,14 @@ int kmscon_terminal_register(struct kmscon_session **out, struct kmscon_seat *se
 	if (ret)
 		goto err_ptyfd;
 
+	ret = ev_eloop_new_timer(term->eloop, &term->redraw_timer, NULL, redraw_timer_cb, term);
+	if (ret)
+		goto err_input;
+
 	if (term->conf->mouse) {
 		ret = uterm_input_register_pointer_cb(term->input, pointer_event, term);
 		if (ret)
-			goto err_input;
+			goto err_timer;
 	}
 
 	ret = kmscon_seat_register_session(seat, &term->session, session_event, term);
@@ -950,6 +1000,8 @@ int kmscon_terminal_register(struct kmscon_session **out, struct kmscon_seat *se
 
 err_pointer:
 	uterm_input_unregister_pointer_cb(term->input, pointer_event, term);
+err_timer:
+	ev_eloop_rm_timer(term->redraw_timer);
 err_input:
 	uterm_input_unregister_key_cb(term->input, input_event, term);
 err_ptyfd:

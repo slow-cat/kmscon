@@ -45,7 +45,7 @@
 
 #define LOG_SUBSYSTEM "pty"
 
-#define KMSCON_NREAD 16384
+#define KMSCON_NREAD 65536
 
 #define MAX_RETRY_TIME 2
 #define MAX_RETRY_COUNT 5
