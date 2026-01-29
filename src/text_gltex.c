@@ -142,6 +142,11 @@ struct gltex {
 	/* Cell state tracking for differential rendering */
 	struct gltex_cell *prev_cells;
 	unsigned int num_cells;
+	
+	/* Cursor drawing - deferred to after FBO blit */
+	bool has_cursor;
+	unsigned int cursor_x;
+	unsigned int cursor_y;
 };
 
 static int gltex_init(struct kmscon_text *txt)
@@ -890,7 +895,7 @@ static int gltex_draw(struct kmscon_text *txt, uint64_t id, const uint32_t *ch, 
 	return 0;
 }
 
-static int gltex_draw_pointer(struct kmscon_text *txt, unsigned int x, unsigned int y)
+static int gltex_draw_pointer_immediate(struct kmscon_text *txt, unsigned int x, unsigned int y)
 {
 	struct gltex *gt = txt->data;
 	struct atlas *atlas;
@@ -974,6 +979,22 @@ static int gltex_draw_pointer(struct kmscon_text *txt, unsigned int x, unsigned 
 	return 0;
 }
 
+static int gltex_draw_pointer(struct kmscon_text *txt, unsigned int x, unsigned int y)
+{
+	struct gltex *gt = txt->data;
+
+	/* If FBO is active, defer cursor drawing until render() */
+	if (gt->offscreen_fbo) {
+		gt->has_cursor = true;
+		gt->cursor_x = x;
+		gt->cursor_y = y;
+		return 0;
+	}
+
+	/* No FBO: draw cursor immediately */
+	return gltex_draw_pointer_immediate(txt, x, y);
+}
+
 static int gltex_render(struct kmscon_text *txt)
 {
 	struct gltex *gt = txt->data;
@@ -1037,6 +1058,51 @@ static int gltex_render(struct kmscon_text *txt)
 			glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		} else {
 			log_warning("FBO enabled but no blit function - should not happen");
+		}
+		
+		/* Draw cursor on backbuffer after FBO blit */
+		if (gt->has_cursor) {
+			int cursor_ret = gltex_draw_pointer_immediate(txt, gt->cursor_x, gt->cursor_y);
+			if (cursor_ret == 0) {
+				gl_shader_use(gt->shader);
+				glViewport(0, 0, gt->sw, gt->sh);
+				glDisable(GL_BLEND);
+
+				gl_m4_identity(mat);
+				glUniformMatrix4fv(gt->uni_proj, 1, GL_FALSE, mat);
+				glUniform1f(gt->uni_cos, gt->cos);
+				glUniform1f(gt->uni_sin, gt->sin);
+
+				glEnableVertexAttribArray(0);
+				glEnableVertexAttribArray(1);
+				glEnableVertexAttribArray(2);
+				glEnableVertexAttribArray(3);
+
+				glActiveTexture(GL_TEXTURE0);
+				glUniform1i(gt->uni_atlas, 0);
+
+				shl_dlist_for_each(iter, &gt->atlases) {
+					atlas = shl_dlist_entry(iter, struct atlas, list);
+					if (!atlas->cache_num)
+						continue;
+
+					glBindTexture(GL_TEXTURE_2D, atlas->tex);
+					glUniform1f(gt->uni_advance_htex, atlas->advance_htex);
+					glUniform1f(gt->uni_advance_vtex, atlas->advance_vtex);
+
+					glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, atlas->cache_pos);
+					glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, atlas->cache_texpos);
+					glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 0, atlas->cache_fgcol);
+					glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 0, atlas->cache_bgcol);
+					glDrawArrays(GL_TRIANGLES, 0, 6 * atlas->cache_num);
+				}
+
+				glDisableVertexAttribArray(0);
+				glDisableVertexAttribArray(1);
+				glDisableVertexAttribArray(2);
+				glDisableVertexAttribArray(3);
+			}
+			gt->has_cursor = false;
 		}
 
 		if (gl_has_error(gt->shader)) {
