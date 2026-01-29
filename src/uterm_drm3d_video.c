@@ -150,6 +150,7 @@ static int display_allocfb(struct uterm_display *disp)
 		goto err_surface;
 	}
 
+	/* Initial clear for double-buffering setup */
 	glClearColor(0, 0, 0, 0);
 	glClear(GL_COLOR_BUFFER_BIT);
 	if (!eglSwapBuffers(v3d->disp, d3d->surface)) {
@@ -400,8 +401,7 @@ static void show_displays(struct uterm_video *video)
 		if (ret)
 			continue;
 
-		glClearColor(0, 0, 0, 1);
-		glClear(GL_COLOR_BUFFER_BIT);
+		/* Note: glClear removed - renderers handle their own clearing */
 		display_swap(iter);
 	}
 }
