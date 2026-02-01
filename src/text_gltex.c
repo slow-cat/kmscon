@@ -36,6 +36,7 @@
  * each atlas we have.
  */
 
+#include <libtsm.h>
 #define GL_GLEXT_PROTOTYPES
 
 #include <EGL/egl.h>
@@ -98,6 +99,7 @@ struct glyph {
 struct gltex_cell {
 	uint64_t id;
 	struct tsm_screen_attr attr;
+	bool overflow;
 };
 
 struct gltex {
@@ -105,7 +107,6 @@ struct gltex {
 	struct shl_hashtable *bold_glyphs;
 	unsigned int max_tex_size;
 	bool supports_rowlen;
-	bool previous_overflow;
 
 	struct shl_dlist atlases;
 
@@ -133,16 +134,15 @@ struct gltex {
 	GLuint offscreen_texture;
 	float bg_r, bg_g, bg_b;
 	bool need_clear;
-	
+
 	/* Function pointer for glBlitFramebuffer (dynamically loaded) */
-	void (*glBlitFramebufferFunc)(GLint, GLint, GLint, GLint,
-	                               GLint, GLint, GLint, GLint,
-	                               GLbitfield, GLenum);
+	void (*glBlitFramebufferFunc)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint,
+				      GLbitfield, GLenum);
 
 	/* Cell state tracking for differential rendering */
 	struct gltex_cell *prev_cells;
 	unsigned int num_cells;
-	
+
 	/* Cursor drawing - deferred to after FBO blit */
 	bool has_cursor;
 	unsigned int cursor_x;
@@ -287,23 +287,25 @@ static int gltex_set(struct kmscon_text *txt)
 		log_warning("your GL implementation does not support GL_EXT_unpack_subimage, "
 			    "glyph-rendering may be slower than usual");
 	}
-	
+
 	/* Load glBlitFramebuffer function for FBO support */
 	gt->glBlitFramebufferFunc = NULL;
 	if (ext) {
 		if (strstr(ext, "GL_ANGLE_framebuffer_blit")) {
-			gt->glBlitFramebufferFunc = (void*)eglGetProcAddress("glBlitFramebufferANGLE");
+			gt->glBlitFramebufferFunc =
+				(void *)eglGetProcAddress("glBlitFramebufferANGLE");
 			if (gt->glBlitFramebufferFunc)
 				log_info("glBlitFramebufferANGLE loaded (ANGLE)");
 		}
 		if (!gt->glBlitFramebufferFunc && strstr(ext, "GL_NV_framebuffer_blit")) {
-			gt->glBlitFramebufferFunc = (void*)eglGetProcAddress("glBlitFramebufferNV");
+			gt->glBlitFramebufferFunc =
+				(void *)eglGetProcAddress("glBlitFramebufferNV");
 			if (gt->glBlitFramebufferFunc)
 				log_info("glBlitFramebufferNV loaded (NV)");
 		}
 	}
 	if (!gt->glBlitFramebufferFunc) {
-		gt->glBlitFramebufferFunc = (void*)eglGetProcAddress("glBlitFramebuffer");
+		gt->glBlitFramebufferFunc = (void *)eglGetProcAddress("glBlitFramebuffer");
 		if (gt->glBlitFramebufferFunc) {
 			log_info("glBlitFramebuffer loaded (core GLES3)");
 		} else {
@@ -330,7 +332,7 @@ static int gltex_set(struct kmscon_text *txt)
 			goto err_shader;
 		}
 		memset(gt->prev_cells, 0, sizeof(*gt->prev_cells) * gt->num_cells);
-		gt->need_clear = true;  /* Need full redraw after cell array change */
+		gt->need_clear = true; /* Need full redraw after cell array change */
 	}
 
 	/* Create or recreate FBO if needed */
@@ -340,7 +342,7 @@ static int gltex_set(struct kmscon_text *txt)
 			log_info("FBO disabled: glBlitFramebuffer not available");
 			goto skip_fbo;
 		}
-		
+
 		/* Delete old FBO if it exists */
 		if (gt->offscreen_fbo) {
 			glDeleteFramebuffers(1, &gt->offscreen_fbo);
@@ -350,18 +352,18 @@ static int gltex_set(struct kmscon_text *txt)
 		/* Create offscreen FBO */
 		glGenFramebuffers(1, &gt->offscreen_fbo);
 		glGenTextures(1, &gt->offscreen_texture);
-		log_info("FBO: Generated FBO=%u, Texture=%u for size %ux%u", 
-			 gt->offscreen_fbo, gt->offscreen_texture, gt->sw, gt->sh);
+		log_info("FBO: Generated FBO=%u, Texture=%u for size %ux%u", gt->offscreen_fbo,
+			 gt->offscreen_texture, gt->sw, gt->sh);
 
 		glBindTexture(GL_TEXTURE_2D, gt->offscreen_texture);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, gt->sw, gt->sh, 0,
-			     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, gt->sw, gt->sh, 0, GL_RGBA,
+			     GL_UNSIGNED_BYTE, NULL);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
 		glBindFramebuffer(GL_FRAMEBUFFER, gt->offscreen_fbo);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-				       GL_TEXTURE_2D, gt->offscreen_texture, 0);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+				       gt->offscreen_texture, 0);
 
 		GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
 		if (status != GL_FRAMEBUFFER_COMPLETE) {
@@ -426,7 +428,7 @@ static void gltex_unset(struct kmscon_text *txt)
 		free(atlas);
 	}
 
-	/* Note: We do NOT free prev_cells and FBO here because gltex_set() 
+	/* Note: We do NOT free prev_cells and FBO here because gltex_set()
 	 * may be called again (e.g. on rotate) and we want to preserve state */
 
 	if (gl) {
@@ -703,7 +705,7 @@ static int gltex_rotate(struct kmscon_text *txt, enum Orientation orientation)
 		gt->advance_x = 2.0 / gt->sw * FONT_WIDTH(txt) * aspect;
 		gt->advance_y = 2.0 / gt->sh * FONT_HEIGHT(txt) * (1. / aspect);
 	}
-	
+
 	log_info("gltex_rotate called - unset/set will preserve FBO state");
 	gltex_unset(txt);
 	gltex_set(txt);
@@ -734,7 +736,8 @@ static int gltex_prepare(struct kmscon_text *txt, struct tsm_screen_attr *attr)
 	float new_bg_b = attr->bb / 255.0;
 
 	if (gt->bg_r != new_bg_r || gt->bg_g != new_bg_g || gt->bg_b != new_bg_b) {
-		log_warning("FBO: bg color changed from (%.2f,%.2f,%.2f) to (%.2f,%.2f,%.2f), need_clear=true",
+		log_warning("FBO: bg color changed from (%.2f,%.2f,%.2f) to (%.2f,%.2f,%.2f), "
+			    "need_clear=true",
 			    gt->bg_r, gt->bg_g, gt->bg_b, new_bg_r, new_bg_g, new_bg_b);
 		gt->bg_r = new_bg_r;
 		gt->bg_g = new_bg_g;
@@ -748,7 +751,7 @@ static int gltex_prepare(struct kmscon_text *txt, struct tsm_screen_attr *attr)
 		glClearColor(gt->bg_r, gt->bg_g, gt->bg_b, 1.0);
 		glClear(GL_COLOR_BUFFER_BIT);
 		gt->need_clear = false;
-		
+
 		/* Also clear prev_cells to force full redraw */
 		if (gt->prev_cells && gt->num_cells > 0) {
 			memset(gt->prev_cells, 0, sizeof(*gt->prev_cells) * gt->num_cells);
@@ -778,65 +781,14 @@ static int gltex_prepare(struct kmscon_text *txt, struct tsm_screen_attr *attr)
 
 	return 0;
 }
-
-static int gltex_draw(struct kmscon_text *txt, uint64_t id, const uint32_t *ch, size_t len,
-		      unsigned int width, unsigned int posx, unsigned int posy,
+static int atlas_push(struct gltex *gt, struct atlas *atlas, unsigned int posx, unsigned int posy,
+		      unsigned int width, const struct glyph *glyph,
 		      const struct tsm_screen_attr *attr)
 {
-	struct gltex *gt = txt->data;
-	struct atlas *atlas;
-	struct glyph *glyph;
-	float gl_x1, gl_x2, gl_y1, gl_y2;
-	int ret, i, idx;
-	unsigned int cell_idx;
-
-	if (!width)
-		return 0;
-
-	/* Differential rendering: check if cell changed */
-	if (gt->prev_cells && gt->num_cells > 0 && !gt->need_clear) {
-		cell_idx = posy * txt->cols + posx;
-		if (cell_idx < gt->num_cells) {
-			struct gltex_cell *prev = &gt->prev_cells[cell_idx];
-			
-			/* Skip if cell unchanged */
-			if (prev->id == id && 
-			    !memcmp(&prev->attr, attr, sizeof(*attr))) {
-				return 0;
-			}
-			
-			/* Update cell state */
-			prev->id = id;
-			prev->attr = *attr;
-		}
-	} else if (gt->prev_cells && gt->num_cells > 0) {
-		/* Force update cell state when need_clear is true */
-		cell_idx = posy * txt->cols + posx;
-		if (cell_idx < gt->num_cells) {
-			gt->prev_cells[cell_idx].id = id;
-			gt->prev_cells[cell_idx].attr = *attr;
-		}
-	}
-
-	if (!len && posx && gt->previous_overflow) {
-		gt->previous_overflow = false;
-		return 0;
-	}
-	ret = find_glyph(txt, &glyph, id, ch, len, attr);
-	if (ret)
-		return ret;
-	atlas = glyph->atlas;
-
-	if (width == 1 && glyph->glyph->width == 2) {
-		gt->previous_overflow = true;
-		width = 2;
-	} else {
-		gt->previous_overflow = false;
-	}
-
 	if (atlas->cache_num >= atlas->cache_size)
 		return -ERANGE;
-
+	float gl_x1, gl_x2, gl_y1, gl_y2;
+	int i, idx;
 	idx = atlas->cache_num * 2 * 6;
 	gl_x1 = gt->advance_x * posx - 1.0;
 	gl_x2 = gl_x1 + width * gt->advance_x;
@@ -893,6 +845,70 @@ static int gltex_draw(struct kmscon_text *txt, uint64_t id, const uint32_t *ch, 
 	++atlas->cache_num;
 
 	return 0;
+}
+static int gltex_draw(struct kmscon_text *txt, uint64_t id, const uint32_t *ch, size_t len,
+		      unsigned int width, unsigned int posx, unsigned int posy,
+		      const struct tsm_screen_attr *attr)
+{
+	struct gltex *gt = txt->data;
+	struct atlas *atlas;
+	struct glyph *glyph;
+	unsigned int cell_idx;
+
+	if (!width)
+		return 0;
+	cell_idx = posy * txt->cols + posx;
+	if (!len && posx && gt->prev_cells && cell_idx < gt->num_cells &&
+	    gt->prev_cells[cell_idx - 1].overflow) {
+		struct gltex_cell *prev = &gt->prev_cells[cell_idx];
+		prev->id = id;
+		prev->attr = *attr;
+		prev->overflow = false;
+		return 0;
+	}
+	int ret;
+
+	ret = find_glyph(txt, &glyph, id, ch, len, attr);
+	if (ret)
+		return ret;
+	atlas = glyph->atlas;
+
+	if (width == 1 && glyph->glyph->width == 2) {
+		width = 2;
+	}
+	/* Differential rendering: check if cell changed */
+	if (gt->prev_cells && gt->num_cells > 0 && cell_idx < gt->num_cells) {
+		struct gltex_cell *prev = &gt->prev_cells[cell_idx];
+		bool new_overflow = (glyph->glyph->width == 2 && posx + 1 < txt->cols);
+		if (prev->overflow && !new_overflow && posx + 1 < txt->cols) {
+			struct tsm_screen_attr a = *attr;
+			struct glyph *eglyph;
+			struct atlas *eatlas;
+			uint32_t dummy = 0;
+			uint64_t eid = 0;
+			a.inverse = false;
+			a.fr = a.br;
+			a.fg = a.bg;
+			a.fb = a.bb;
+			ret = find_glyph(txt, &eglyph, eid, &dummy, 0, &a);
+			if (ret == 0) {
+				eatlas = eglyph->atlas;
+				atlas_push(gt, eatlas, posx + 1, posy, 1, eglyph, &a);
+			}
+		}
+
+		/* Skip if cell unchanged */
+		if (!gt->need_clear && prev->id == id && prev->overflow == new_overflow &&
+		    !memcmp(&prev->attr, attr, sizeof(*attr))) {
+			return 0;
+		}
+
+		/* Update cell state */
+		prev->id = id;
+		prev->attr = *attr;
+		prev->overflow = new_overflow;
+	}
+	return atlas_push(gt, atlas, posx, posy, width, glyph, attr);
 }
 
 static int gltex_draw_pointer_immediate(struct kmscon_text *txt, unsigned int x, unsigned int y)
@@ -1008,7 +1024,7 @@ static int gltex_render(struct kmscon_text *txt)
 	if (gt->offscreen_fbo) {
 		/* Render to FBO */
 		glBindFramebuffer(GL_FRAMEBUFFER, gt->offscreen_fbo);
-		
+
 		gl_shader_use(gt->shader);
 		glViewport(0, 0, gt->sw, gt->sh);
 		glDisable(GL_BLEND);
@@ -1052,17 +1068,17 @@ static int gltex_render(struct kmscon_text *txt)
 		if (gt->glBlitFramebufferFunc) {
 			glBindFramebuffer(GL_READ_FRAMEBUFFER_NV, gt->offscreen_fbo);
 			glBindFramebuffer(GL_DRAW_FRAMEBUFFER_NV, 0);
-			gt->glBlitFramebufferFunc(0, 0, gt->sw, gt->sh,
-						   0, 0, gt->sw, gt->sh,
-						   GL_COLOR_BUFFER_BIT, GL_NEAREST);
+			gt->glBlitFramebufferFunc(0, 0, gt->sw, gt->sh, 0, 0, gt->sw, gt->sh,
+						  GL_COLOR_BUFFER_BIT, GL_NEAREST);
 			glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		} else {
 			log_warning("FBO enabled but no blit function - should not happen");
 		}
-		
+
 		/* Draw cursor on backbuffer after FBO blit */
 		if (gt->has_cursor) {
-			int cursor_ret = gltex_draw_pointer_immediate(txt, gt->cursor_x, gt->cursor_y);
+			int cursor_ret =
+				gltex_draw_pointer_immediate(txt, gt->cursor_x, gt->cursor_y);
 			if (cursor_ret == 0) {
 				gl_shader_use(gt->shader);
 				glViewport(0, 0, gt->sw, gt->sh);
@@ -1081,7 +1097,8 @@ static int gltex_render(struct kmscon_text *txt)
 				glActiveTexture(GL_TEXTURE0);
 				glUniform1i(gt->uni_atlas, 0);
 
-				shl_dlist_for_each(iter, &gt->atlases) {
+				shl_dlist_for_each(iter, &gt->atlases)
+				{
 					atlas = shl_dlist_entry(iter, struct atlas, list);
 					if (!atlas->cache_num)
 						continue;
@@ -1090,10 +1107,14 @@ static int gltex_render(struct kmscon_text *txt)
 					glUniform1f(gt->uni_advance_htex, atlas->advance_htex);
 					glUniform1f(gt->uni_advance_vtex, atlas->advance_vtex);
 
-					glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, atlas->cache_pos);
-					glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, atlas->cache_texpos);
-					glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 0, atlas->cache_fgcol);
-					glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 0, atlas->cache_bgcol);
+					glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0,
+							      atlas->cache_pos);
+					glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0,
+							      atlas->cache_texpos);
+					glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 0,
+							      atlas->cache_fgcol);
+					glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, 0,
+							      atlas->cache_bgcol);
 					glDrawArrays(GL_TRIANGLES, 0, 6 * atlas->cache_num);
 				}
 
