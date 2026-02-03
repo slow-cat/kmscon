@@ -717,7 +717,7 @@ static void  update_background_of_offscreen(struct gltex*gt,struct tsm_screen_at
 	}
 }
 
-static int gltex_prepare(struct kmscon_text *txt)
+static int gltex_prepare(struct kmscon_text *txt,struct tsm_screen_attr*attr)
 {
 	struct gltex *gt = txt->data;
 	struct atlas *atlas;
@@ -728,8 +728,7 @@ static int gltex_prepare(struct kmscon_text *txt)
 	if (ret)
 		return ret;
 
-	extern struct tsm_screen_attr* vte_def_attr;
-	update_background_of_offscreen(gt, vte_def_attr);
+	update_background_of_offscreen(gt, attr);
 	
 	shl_dlist_for_each(iter, &gt->atlases) {
 		atlas = shl_dlist_entry(iter, struct atlas, list);

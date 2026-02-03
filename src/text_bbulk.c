@@ -33,6 +33,7 @@
  */
 
 #include <errno.h>
+#include <libtsm.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -372,7 +373,7 @@ static int bbulk_render(struct kmscon_text *txt)
 	return ret;
 }
 
-static int bbulk_prepare(struct kmscon_text *txt)
+static int bbulk_prepare(struct kmscon_text *txt,struct tsm_screen_attr*_attr)
 {
 	struct bbulk *bb = txt->data;
 	int i;
