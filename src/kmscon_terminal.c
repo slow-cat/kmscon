@@ -175,6 +175,7 @@ static void draw_pointer(struct screen *scr)
 
 static void do_redraw_screen(struct screen *scr)
 {
+	static struct tsm_screen_attr vte_def_attr;
 	int ret;
 
 	if (!scr->term->awake || !kmscon_session_get_foreground(scr->term->session))
@@ -183,6 +184,7 @@ static void do_redraw_screen(struct screen *scr)
 	scr->pending = false;
 	do_clear_margins(scr);
 
+	tsm_vte_get_def_attr(scr->term->vte, &vte_def_attr);
 	kmscon_text_prepare(scr->txt);
 	tsm_screen_draw(scr->term->console, kmscon_text_draw_cb, scr->txt);
 	draw_pointer(scr);

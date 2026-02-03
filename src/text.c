@@ -32,6 +32,7 @@
  */
 
 #include <errno.h>
+#include <libtsm.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
