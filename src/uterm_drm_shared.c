@@ -47,8 +47,17 @@
 #include "uterm_video_internal.h"
 
 #define LOG_SUBSYSTEM "drm_shared"
+#define DRM_CURSOR_COMMIT_INTERVAL_USEC 16666
 
 static void drm_cursor_free_buffer(int fd, struct uterm_drm_display *ddrm);
+
+static uint64_t drm_now_usec(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
 
 static uint32_t get_property_id(int fd, drmModeObjectPropertiesPtr props, const char *name)
 {
@@ -622,6 +631,69 @@ int uterm_drm_display_wait_pflip(struct uterm_display *disp)
 	return 0;
 }
 
+static bool drm_cursor_props_complete(const struct drm_cursor_props *props)
+{
+	return props->crtc_id && props->fb_id && props->crtc_x && props->crtc_y &&
+	       props->crtc_w && props->crtc_h && props->src_x && props->src_y &&
+	       props->src_w && props->src_h;
+}
+
+static void drm_cursor_clear_props(struct uterm_drm_display *ddrm)
+{
+	if (!ddrm)
+		return;
+
+	memset(&ddrm->cursor_props, 0, sizeof(ddrm->cursor_props));
+}
+
+/**
+ * Cache cursor plane property IDs for atomic cursor updates.
+ *
+ * This is called once after the cursor plane is discovered so cursor updates
+ * do not need to query properties on every move.
+ *
+ * @param fd DRM file descriptor.
+ * @param ddrm Display to update.
+ *
+ * Returns: 0 on success, negative error code on failure.
+ */
+static int drm_cursor_cache_props(int fd, struct uterm_drm_display *ddrm)
+{
+	drmModeObjectPropertiesPtr props;
+
+	if (!ddrm || !ddrm->cursor_plane.id)
+		return -EINVAL;
+
+	drm_cursor_clear_props(ddrm);
+
+	props = drmModeObjectGetProperties(fd, ddrm->cursor_plane.id, DRM_MODE_OBJECT_PLANE);
+	if (!props)
+		return -EFAULT;
+
+	ddrm->cursor_props.crtc_id = get_property_id(fd, props, "CRTC_ID");
+	ddrm->cursor_props.fb_id = get_property_id(fd, props, "FB_ID");
+
+	ddrm->cursor_props.crtc_x = get_property_id(fd, props, "CRTC_X");
+	ddrm->cursor_props.crtc_y = get_property_id(fd, props, "CRTC_Y");
+	ddrm->cursor_props.crtc_w = get_property_id(fd, props, "CRTC_W");
+	ddrm->cursor_props.crtc_h = get_property_id(fd, props, "CRTC_H");
+
+	ddrm->cursor_props.src_x = get_property_id(fd, props, "SRC_X");
+	ddrm->cursor_props.src_y = get_property_id(fd, props, "SRC_Y");
+	ddrm->cursor_props.src_w = get_property_id(fd, props, "SRC_W");
+	ddrm->cursor_props.src_h = get_property_id(fd, props, "SRC_H");
+
+	drmModeFreeObjectProperties(props);
+
+	ddrm->cursor_props.valid = drm_cursor_props_complete(&ddrm->cursor_props);
+	if (!ddrm->cursor_props.valid) {
+		log_debug("cursor plane %u missing required properties", ddrm->cursor_plane.id);
+		return -EOPNOTSUPP;
+	}
+
+	return 0;
+}
+
 static int modeset_find_cursor_plane(int fd, struct uterm_drm_display *ddrm)
 {
 	drmModePlaneResPtr plane_res;
@@ -633,6 +705,7 @@ static int modeset_find_cursor_plane(int fd, struct uterm_drm_display *ddrm)
 	ddrm->cursor_plane.id = 0;
 	ddrm->cursor_valid = false;
 	ddrm->cursor_enabled = false;
+	drm_cursor_clear_props(ddrm);
 
 	plane_res = drmModeGetPlaneResources(fd);
 	if (!plane_res)
@@ -681,25 +754,15 @@ static int modeset_find_cursor_plane(int fd, struct uterm_drm_display *ddrm)
 
 static int drm_cursor_disable(int fd, drmModeAtomicReq *req, struct uterm_drm_display *ddrm)
 {
-	drmModeObjectPropertiesPtr props;
-	uint32_t prop_id;
-
 	if (!ddrm || !ddrm->cursor_valid || !ddrm->cursor_plane.id)
 		return -ENOENT;
 
-	props = drmModeObjectGetProperties(fd, ddrm->cursor_plane.id, DRM_MODE_OBJECT_PLANE);
-	if (!props)
-		return -EFAULT;
+	(void)fd;
+	if (!ddrm->cursor_props.valid)
+		return -EOPNOTSUPP;
 
-	prop_id = get_property_id(fd, props, "CRTC_ID");
-	if (prop_id)
-		drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, prop_id, 0);
-
-	prop_id = get_property_id(fd, props, "FB_ID");
-	if (prop_id)
-		drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, prop_id, 0);
-
-	drmModeFreeObjectProperties(props);
+	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, ddrm->cursor_props.crtc_id, 0);
+	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, ddrm->cursor_props.fb_id, 0);
 
 	return 0;
 }
@@ -707,55 +770,30 @@ static int drm_cursor_disable(int fd, drmModeAtomicReq *req, struct uterm_drm_di
 static int drm_cursor_enable(int fd, drmModeAtomicReq *req, struct uterm_drm_display *ddrm,
 			     uint32_t crtc_id, uint32_t fb_id, int x, int y, int w, int h)
 {
-	drmModeObjectPropertiesPtr props;
-	uint32_t p_crtc_id, p_fb_id;
-	uint32_t p_crtc_x, p_crtc_y, p_crtc_w, p_crtc_h;
-	uint32_t p_src_x, p_src_y, p_src_w, p_src_h;
-
 	if (!ddrm || !ddrm->cursor_valid || !ddrm->cursor_plane.id)
 		return -ENOENT;
+	if (!ddrm->cursor_props.valid)
+		return -EOPNOTSUPP;
 
+	(void)fd;
 	x -= ddrm->hot_x;
 	y -= ddrm->hot_y;
 
-	props = drmModeObjectGetProperties(fd, ddrm->cursor_plane.id, DRM_MODE_OBJECT_PLANE);
-	if (!props)
-		return -EFAULT;
+	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, ddrm->cursor_props.crtc_id, crtc_id);
+	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, ddrm->cursor_props.fb_id, fb_id);
 
-	p_crtc_id = get_property_id(fd, props, "CRTC_ID");
-	p_fb_id = get_property_id(fd, props, "FB_ID");
-
-	p_crtc_x = get_property_id(fd, props, "CRTC_X");
-	p_crtc_y = get_property_id(fd, props, "CRTC_Y");
-	p_crtc_w = get_property_id(fd, props, "CRTC_W");
-	p_crtc_h = get_property_id(fd, props, "CRTC_H");
-
-	p_src_x = get_property_id(fd, props, "SRC_X");
-	p_src_y = get_property_id(fd, props, "SRC_Y");
-	p_src_w = get_property_id(fd, props, "SRC_W");
-	p_src_h = get_property_id(fd, props, "SRC_H");
-
-	if (!p_crtc_id || !p_fb_id || !p_crtc_x || !p_crtc_y || !p_crtc_w || !p_crtc_h ||
-	    !p_src_x || !p_src_y || !p_src_w || !p_src_h) {
-		drmModeFreeObjectProperties(props);
-		return -EOPNOTSUPP;
-	}
-
-	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, p_crtc_id, crtc_id);
-	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, p_fb_id, fb_id);
-
-	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, p_crtc_x, x);
-	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, p_crtc_y, y);
-	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, p_crtc_w, w);
-	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, p_crtc_h, h);
+	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, ddrm->cursor_props.crtc_x, x);
+	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, ddrm->cursor_props.crtc_y, y);
+	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, ddrm->cursor_props.crtc_w, w);
+	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, ddrm->cursor_props.crtc_h, h);
 
 	/* SRC_* are usually 16.16 fixed */
-	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, p_src_x, 0);
-	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, p_src_y, 0);
-	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, p_src_w, (uint32_t)(w << 16));
-	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, p_src_h, (uint32_t)(h << 16));
-
-	drmModeFreeObjectProperties(props);
+	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, ddrm->cursor_props.src_x, 0);
+	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, ddrm->cursor_props.src_y, 0);
+	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, ddrm->cursor_props.src_w,
+				 (uint32_t)(w << 16));
+	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, ddrm->cursor_props.src_h,
+				 (uint32_t)(h << 16));
 
 	ddrm->cursor_fb_id = fb_id;
 	ddrm->cursor_w = w;
@@ -795,6 +833,7 @@ static void drm_cursor_free_buffer(int fd, struct uterm_drm_display *ddrm)
 	ddrm->cursor_h = 0;
 	ddrm->cursor_x = 0;
 	ddrm->cursor_y = 0;
+	ddrm->cursor_last_commit_usec = 0;
 }
 
 static void drm_cursor_fill_default(struct uterm_drm_display *ddrm, int w, int h)
@@ -986,7 +1025,8 @@ int uterm_drm_display_set_cursor(struct uterm_display *disp, const uint8_t *argb
 	if (!vdrm)
 		return -EINVAL;
 
-	if (!vdrm->legacy && (!ddrm->cursor_valid || !ddrm->cursor_plane.id))
+	if (!vdrm->legacy &&
+	    (!ddrm->cursor_valid || !ddrm->cursor_plane.id || !ddrm->cursor_props.valid))
 		return -EOPNOTSUPP;
 
 	prev_fb = ddrm->cursor_fb_id;
@@ -1033,18 +1073,22 @@ int uterm_drm_display_move_cursor(struct uterm_display *disp, int x, int y)
 	if (!vdrm)
 		return -EINVAL;
 
-	ddrm->cursor_x = x;
-	ddrm->cursor_y = y;
+	if (ddrm->cursor_x == x && ddrm->cursor_y == y)
+		return 0;
 
 	if (vdrm->legacy) {
+		ddrm->cursor_x = x;
+		ddrm->cursor_y = y;
 		ret = drmModeMoveCursor(vdrm->fd, ddrm->crtc.id, x - ddrm->hot_x, y - ddrm->hot_y);
 		if (ret)
 			return ret;
 		return 0;
 	}
 
-	if (!ddrm->cursor_valid || !ddrm->cursor_plane.id)
+	if (!ddrm->cursor_valid || !ddrm->cursor_plane.id || !ddrm->cursor_props.valid)
 		return -EOPNOTSUPP;
+	ddrm->cursor_x = x;
+	ddrm->cursor_y = y;
 	if (ddrm->cursor_want_enabled)
 		ddrm->cursor_dirty = true;
 	return 0;
@@ -1076,7 +1120,7 @@ int uterm_drm_display_hide_cursor(struct uterm_display *disp)
 		return 0;
 	}
 
-	if (!ddrm->cursor_valid || !ddrm->cursor_plane.id)
+	if (!ddrm->cursor_valid || !ddrm->cursor_plane.id || !ddrm->cursor_props.valid)
 		return -EOPNOTSUPP;
 
 	if (!ddrm->cursor_want_enabled && !ddrm->cursor_dirty)
@@ -1096,7 +1140,8 @@ int uterm_drm_display_hide_cursor(struct uterm_display *disp)
  * - uterm_drm_display_flush_cursor()
  *
  * This function is typically called once per input sync from
- * update_hw_cursor_all() to avoid competing atomic commits.
+ * update_hw_cursor_all() to avoid competing atomic commits. Commits are
+ * rate-limited to ~60Hz to reduce CPU overhead from frequent cursor moves.
  *
  * @disp Display to update.
  *
@@ -1123,11 +1168,19 @@ int uterm_drm_display_flush_cursor(struct uterm_display *disp)
 	if (!ddrm->cursor_dirty)
 		return 0;
 
-	if (!ddrm->cursor_valid || !ddrm->cursor_plane.id)
+	if (!ddrm->cursor_valid || !ddrm->cursor_plane.id || !ddrm->cursor_props.valid)
 		return -EOPNOTSUPP;
 
 	if (disp->flags & DISPLAY_VSYNC)
 		return -EBUSY;
+
+	if (ddrm->cursor_last_commit_usec) {
+		uint64_t now = drm_now_usec();
+
+		if (now >= ddrm->cursor_last_commit_usec &&
+		    now - ddrm->cursor_last_commit_usec < DRM_CURSOR_COMMIT_INTERVAL_USEC)
+			return -EBUSY;
+	}
 
 	req = drmModeAtomicAlloc();
 	if (!req)
@@ -1150,6 +1203,7 @@ int uterm_drm_display_flush_cursor(struct uterm_display *disp)
 
 	ddrm->cursor_enabled = ddrm->cursor_want_enabled;
 	ddrm->cursor_dirty = false;
+	ddrm->cursor_last_commit_usec = drm_now_usec();
 	return 0;
 }
 
@@ -1177,6 +1231,8 @@ static int perform_modeset(struct uterm_video *video)
 
 		uterm_drm_display_wait_pflip(disp);
 		modeset_find_cursor_plane(vdrm->fd, ddrm);
+		if (ddrm->cursor_valid && drm_cursor_cache_props(vdrm->fd, ddrm) < 0)
+			ddrm->cursor_valid = false;
 
 		log_info("Preparing modeset for %s at %dx%d\n", disp->name,
 			 ddrm->current_mode->hdisplay, ddrm->current_mode->vdisplay);

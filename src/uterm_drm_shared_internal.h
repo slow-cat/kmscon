@@ -45,6 +45,23 @@ struct drm_object {
 	uint32_t id;
 };
 
+/**
+ * Cached cursor plane property IDs for atomic cursor updates.
+ */
+struct drm_cursor_props {
+	uint32_t crtc_id;
+	uint32_t fb_id;
+	uint32_t crtc_x;
+	uint32_t crtc_y;
+	uint32_t crtc_w;
+	uint32_t crtc_h;
+	uint32_t src_x;
+	uint32_t src_y;
+	uint32_t src_w;
+	uint32_t src_h;
+	bool valid;
+};
+
 /* drm dpms */
 
 int uterm_drm_set_dpms(int fd, uint32_t conn_id, int state);
@@ -58,6 +75,7 @@ struct uterm_drm_display {
 	struct drm_object plane;
 
 	struct drm_object cursor_plane;
+	struct drm_cursor_props cursor_props;
 	uint32_t cursor_fb_id;
 	uint32_t cursor_handle;
 	uint32_t cursor_stride;
@@ -73,6 +91,7 @@ struct uterm_drm_display {
 	bool cursor_enabled;
 	bool cursor_dirty;
 	bool cursor_want_enabled;
+	uint64_t cursor_last_commit_usec;
 
 	drmModeModeInfo mode;
 	uint32_t mode_blob_id;
