@@ -174,9 +174,46 @@ int uterm_display_fake_blendv(struct uterm_display *disp, const struct uterm_vid
 void uterm_display_set_damage(struct uterm_display *disp, size_t n_rect,
 			      struct uterm_video_rect *damages);
 bool uterm_display_has_damage(struct uterm_display *disp);
-int uterm_display_set_cursor(struct uterm_display *disp,const uint8_t *argb,int w,int h, int hot_x,int hot_w);
-int uterm_display_move_cursor(struct uterm_display *disp,int x,int y);
+/**
+ * Set the display cursor image and hotspot.
+ *
+ * @disp Display to update.
+ * @argb Cursor buffer in ARGB8888 format. If NULL, a default cursor is used.
+ * @w Cursor width in pixels.
+ * @h Cursor height in pixels.
+ * @hot_x Hotspot x coordinate within the cursor image.
+ * @hot_y Hotspot y coordinate within the cursor image.
+ *
+ * @return 0 on success, negative error code on failure.
+ */
+int uterm_display_set_cursor(struct uterm_display *disp, const uint8_t *argb, int w, int h,
+			     int hot_x, int hot_y);
+/**
+ * Move the display cursor to a new position.
+ *
+ * @disp Display to update.
+ * @x Cursor x coordinate in pixels.
+ * @y Cursor y coordinate in pixels.
+ *
+ * @return 0 on success, negative error code on failure.
+ */
+int uterm_display_move_cursor(struct uterm_display *disp, int x, int y);
+/**
+ * Hide the display cursor.
+ *
+ * @disp Display to update.
+ *
+ * @return 0 on success, negative error code on failure.
+ */
 int uterm_display_hide_cursor(struct uterm_display *disp);
+/**
+ * Flush pending cursor updates to hardware.
+ *
+ * @disp Display to update.
+ *
+ * @return 0 on success, negative error code on failure.
+ */
+int uterm_display_flush_cursor(struct uterm_display *disp);
 
 /* video interface */
 

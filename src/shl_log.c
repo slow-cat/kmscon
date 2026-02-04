@@ -208,6 +208,18 @@ void log_clean_filters()
 	log_unlock();
 }
 
+SHL_EXPORT
+bool log_is_debug_enabled(void)
+{
+	bool enabled;
+
+	log_lock();
+	enabled = (log__gconfig.sev[LOG_DEBUG] == 1);
+	log_unlock();
+
+	return enabled;
+}
+
 static bool log__matches(const struct log_filter *filter, const char *file, int line,
 			 const char *func, const char *subs)
 {

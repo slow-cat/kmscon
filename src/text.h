@@ -65,6 +65,7 @@ struct kmscon_text {
 	unsigned int rows;
 	bool rendering;
 	bool overflow_next;
+	bool offscreen;
 	enum Orientation orientation;
 };
 
@@ -81,6 +82,8 @@ struct kmscon_text_ops {
 		    unsigned int width, unsigned int posx, unsigned int posy,
 		    const struct tsm_screen_attr *attr);
 	int (*draw_pointer)(struct kmscon_text *txt, unsigned int x, unsigned int y);
+	void (*damage_cell)(struct kmscon_text *txt, unsigned int posx, unsigned int posy);
+	void (*set_offscreen)(struct kmscon_text *txt, bool enable);
 	int (*render)(struct kmscon_text *txt);
 	void (*abort)(struct kmscon_text *txt);
 };
@@ -109,6 +112,23 @@ int kmscon_text_draw(struct kmscon_text *txt, uint64_t id, const uint32_t *ch, s
 		     unsigned int width, unsigned int posx, unsigned int posy,
 		     const struct tsm_screen_attr *attr);
 int kmscon_text_draw_pointer(struct kmscon_text *txt, unsigned int x, unsigned int y);
+/**
+ * kmscon_text_damage_cell:
+ * @txt: valid text renderer
+ * @posx: cell x coordinate
+ * @posy: cell y coordinate
+ *
+ * Marks a cell as damaged to force a redraw on the next render pass.
+ */
+void kmscon_text_damage_cell(struct kmscon_text *txt, unsigned int posx, unsigned int posy);
+/**
+ * kmscon_text_set_offscreen:
+ * @txt: valid text renderer
+ * @enable: whether offscreen rendering should be enabled
+ *
+ * Requests the renderer to enable or disable offscreen rendering.
+ */
+int kmscon_text_set_offscreen(struct kmscon_text *txt, bool enable);
 int kmscon_text_render(struct kmscon_text *txt);
 void kmscon_text_abort(struct kmscon_text *txt);
 

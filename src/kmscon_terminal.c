@@ -33,6 +33,8 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <libtsm.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "conf.h"
@@ -49,6 +51,64 @@
 #include "uterm_video.h"
 
 #define LOG_SUBSYSTEM "terminal"
+#define HW_CURSOR_FAILURES_FALLBACK 3
+#define KMSCON_CURSOR_W 64
+#define KMSCON_CURSOR_H 64
+#define KMSCON_CURSOR_HOT_X 1
+#define KMSCON_CURSOR_HOT_Y 1
+
+static FILE *terminal_log_file;
+static int terminal_log_users;
+
+static void terminal_tmp_log(const char *level, const char *fmt, ...)
+{
+	va_list args;
+
+	if (!log_is_debug_enabled())
+		return;
+
+	if (!terminal_log_file) {
+		terminal_log_file = fopen("/tmp/kmscon-terminal.log", "a");
+		if (!terminal_log_file)
+			return;
+		setvbuf(terminal_log_file, NULL, _IOLBF, 0);
+	}
+
+	fprintf(terminal_log_file, "[%s] ", level);
+	va_start(args, fmt);
+	vfprintf(terminal_log_file, fmt, args);
+	va_end(args);
+	fputc('\n', terminal_log_file);
+}
+
+static void terminal_tmp_log_close(void)
+{
+	if (!terminal_log_file)
+		return;
+	fclose(terminal_log_file);
+	terminal_log_file = NULL;
+}
+
+#define TERM_LOG_INFO(...)                                                                        \
+	do {                                                                                       \
+		log_info(__VA_ARGS__);                                                             \
+		terminal_tmp_log("INFO", __VA_ARGS__);                                             \
+	} while (0)
+#define TERM_LOG_WARNING(...)                                                                     \
+	do {                                                                                       \
+		log_warning(__VA_ARGS__);                                                          \
+		terminal_tmp_log("WARN", __VA_ARGS__);                                             \
+	} while (0)
+#define TERM_LOG_ERROR(...)                                                                       \
+	do {                                                                                       \
+		log_error(__VA_ARGS__);                                                            \
+		terminal_tmp_log("ERROR", __VA_ARGS__);                                            \
+	} while (0)
+#define TERM_LOG_DEBUG(...)                                                                       \
+	do {                                                                                       \
+		log_debug(__VA_ARGS__);                                                            \
+		terminal_tmp_log("DEBUG", __VA_ARGS__);                                            \
+	} while (0)
 
 struct screen {
 	struct shl_dlist list;
@@ -58,6 +118,13 @@ struct screen {
 
 	bool swapping;
 	bool pending;
+	bool hw_cursor_enabled;
+	unsigned int hw_cursor_failures;
+	enum {
+		KMSCON_HW_CURSOR_UNKNOWN = 0,
+		KMSCON_HW_CURSOR_UNSUPPORTED,
+		KMSCON_HW_CURSOR_SUPPORTED,
+	} hw_cursor;
 };
 
 struct kmscon_pointer {
@@ -98,6 +165,8 @@ struct kmscon_terminal {
 	bool redraw_pending;
 	bool redraw_scheduled;
 	struct ev_timer *redraw_timer;
+	const char *redraw_reason;
+	unsigned long redraw_seq;
 
 	struct kmscon_pointer pointer;
 };
@@ -122,9 +191,213 @@ static void coord_to_cell(struct kmscon_terminal *term, int32_t x, int32_t y, un
 		*posy = h - 1;
 }
 
+static inline bool screen_hide_hw_cursor(struct screen *scr);
+
+/**
+ * Enable the hardware cursor on a screen if supported.
+ *
+ * @param scr Screen to update.
+ * @return true if the hardware cursor is enabled and usable.
+ */
+static inline bool screen_enable_hw_cursor(struct screen *scr)
+{
+	int ret;
+
+	if (scr->hw_cursor == KMSCON_HW_CURSOR_UNSUPPORTED)
+		return false;
+
+	if (scr->hw_cursor_enabled)
+		return true;
+
+	ret = uterm_display_set_cursor(scr->disp, NULL, KMSCON_CURSOR_W, KMSCON_CURSOR_H,
+				       KMSCON_CURSOR_HOT_X, KMSCON_CURSOR_HOT_Y);
+	if (ret == 0) {
+		scr->hw_cursor = KMSCON_HW_CURSOR_SUPPORTED;
+		scr->hw_cursor_enabled = true;
+		scr->hw_cursor_failures = 0;
+		return true;
+	}
+	if (ret == -EOPNOTSUPP) {
+		scr->hw_cursor = KMSCON_HW_CURSOR_UNSUPPORTED;
+		return false;
+	}
+
+	if (ret == -EBUSY || ret == -EINTR || ret == -EAGAIN) {
+		TERM_LOG_DEBUG("cursor enable busy display=%s err=%d",
+			       uterm_display_name(scr->disp), ret);
+		return false;
+	}
+
+	scr->hw_cursor_failures++;
+	TERM_LOG_WARNING("cursor enable failed display=%s err=%d failures=%u",
+			 uterm_display_name(scr->disp), ret, scr->hw_cursor_failures);
+	if (scr->hw_cursor_failures >= HW_CURSOR_FAILURES_FALLBACK) {
+		scr->hw_cursor = KMSCON_HW_CURSOR_UNSUPPORTED;
+		screen_hide_hw_cursor(scr);
+		TERM_LOG_WARNING("cursor fallback to software display=%s",
+				 uterm_display_name(scr->disp));
+	}
+	return false;
+}
+
+/**
+ * Move the hardware cursor on a screen if enabled.
+ *
+ * @param scr Screen to update.
+ * @param x Cursor x coordinate in pixels.
+ * @param y Cursor y coordinate in pixels.
+ * @return true if the hardware cursor was moved.
+ */
+static inline bool screen_move_hw_cursor(struct screen *scr, int32_t x, int32_t y)
+{
+	int ret;
+
+	ret = uterm_display_move_cursor(scr->disp, x, y);
+	if (ret == 0) {
+		scr->hw_cursor_failures = 0;
+		return true;
+	}
+	if (ret == -EOPNOTSUPP) {
+		scr->hw_cursor = KMSCON_HW_CURSOR_UNSUPPORTED;
+		scr->hw_cursor_enabled = false;
+		return false;
+	}
+
+	if (ret == -EBUSY || ret == -EINTR || ret == -EAGAIN) {
+		TERM_LOG_DEBUG("cursor move busy display=%s err=%d",
+			       uterm_display_name(scr->disp), ret);
+		return true;
+	}
+
+	scr->hw_cursor_failures++;
+	TERM_LOG_WARNING("cursor move failed display=%s err=%d failures=%u",
+			 uterm_display_name(scr->disp), ret, scr->hw_cursor_failures);
+	if (scr->hw_cursor_failures >= HW_CURSOR_FAILURES_FALLBACK) {
+		scr->hw_cursor = KMSCON_HW_CURSOR_UNSUPPORTED;
+		screen_hide_hw_cursor(scr);
+		TERM_LOG_WARNING("cursor fallback to software display=%s",
+				 uterm_display_name(scr->disp));
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Hide the hardware cursor for a screen.
+ *
+ * @param scr Screen to update.
+ * @return true if the hardware cursor is hidden or already disabled.
+ */
+static inline bool screen_hide_hw_cursor(struct screen *scr)
+{
+	int ret;
+
+	if (!scr->hw_cursor_enabled)
+		return true;
+
+	ret = uterm_display_hide_cursor(scr->disp);
+	if (ret == 0) {
+		scr->hw_cursor_enabled = false;
+		return true;
+	}
+	if (ret == -EBUSY || ret == -EINTR || ret == -EAGAIN) {
+		TERM_LOG_DEBUG("cursor hide busy display=%s err=%d",
+			       uterm_display_name(scr->disp), ret);
+		return false;
+	}
+
+	TERM_LOG_WARNING("cursor hide failed display=%s err=%d",
+			 uterm_display_name(scr->disp), ret);
+	return false;
+}
+
+/**
+ * Update hardware cursor visibility and position for all screens.
+ *
+ * @param term Terminal to update.
+ * @return true if a software redraw is required.
+ */
+static bool update_hw_cursor_all(struct kmscon_terminal *term)
+{
+	struct shl_dlist *iter;
+	struct screen *scr;
+	bool needs_redraw = false;
+	bool use_offscreen;
+
+	shl_dlist_for_each(iter, &term->screens)
+	{
+		scr = shl_dlist_entry(iter, struct screen, list);
+
+		if (!term->pointer.visible) {
+			screen_hide_hw_cursor(scr);
+			if (scr->hw_cursor == KMSCON_HW_CURSOR_UNSUPPORTED)
+				needs_redraw = true;
+			use_offscreen = false;
+			kmscon_text_set_offscreen(scr->txt, use_offscreen);
+			uterm_display_flush_cursor(scr->disp);
+			continue;
+		}
+
+		if (scr->hw_cursor != KMSCON_HW_CURSOR_UNSUPPORTED) {
+			if (screen_enable_hw_cursor(scr) &&
+			    screen_move_hw_cursor(scr, term->pointer.x, term->pointer.y)) {
+				kmscon_text_set_offscreen(scr->txt, false);
+				uterm_display_flush_cursor(scr->disp);
+				continue;
+			}
+
+			if (scr->hw_cursor != KMSCON_HW_CURSOR_UNSUPPORTED) {
+				kmscon_text_set_offscreen(scr->txt, false);
+				uterm_display_flush_cursor(scr->disp);
+				continue;
+			}
+		}
+
+		if (screen_hide_hw_cursor(scr)) {
+			needs_redraw = true;
+			use_offscreen = true;
+		} else {
+			use_offscreen = false;
+		}
+		kmscon_text_set_offscreen(scr->txt, use_offscreen);
+		uterm_display_flush_cursor(scr->disp);
+	}
+
+	return needs_redraw;
+}
+
+/* Forward declaration */
+static void schedule_redraw_with_reason(struct kmscon_terminal *term, const char *reason);
+
+/**
+ * Mark the cell under the pointer as damaged for all screens.
+ *
+ * @param term Terminal to update.
+ * @param posx Cell x coordinate.
+ * @param posy Cell y coordinate.
+ */
+static void damage_pointer_cell(struct kmscon_terminal *term, unsigned int posx, unsigned int posy)
+{
+	struct shl_dlist *iter;
+	struct screen *scr;
+
+	shl_dlist_for_each(iter, &term->screens)
+	{
+		scr = shl_dlist_entry(iter, struct screen, list);
+		kmscon_text_damage_cell(scr->txt, posx, posy);
+	}
+}
+
 static void draw_pointer(struct screen *scr)
 {
-	if (!scr->term->pointer.visible)
+	if (!scr->term->pointer.visible) {
+		if (scr->hw_cursor_enabled) {
+			uterm_display_hide_cursor(scr->disp);
+			scr->hw_cursor_enabled = false;
+		}
+		return;
+	}
+	if (scr->hw_cursor_enabled)
 		return;
 
 	kmscon_text_draw_pointer(scr->txt, scr->term->pointer.x, scr->term->pointer.y);
@@ -136,9 +409,16 @@ static void do_redraw_screen(struct screen *scr)
 	int ret;
 
 	if (!scr->term->awake || !kmscon_session_get_foreground(scr->term->session))
+	{
+		TERM_LOG_DEBUG("redraw skip: not awake/foreground reason=%s",
+			       scr->term->redraw_reason ? scr->term->redraw_reason : "none");
 		return;
+	}
 
 	scr->pending = false;
+	TERM_LOG_DEBUG("redraw begin display=%s reason=%s",
+		       uterm_display_name(scr->disp),
+		       scr->term->redraw_reason ? scr->term->redraw_reason : "none");
 
 	tsm_vte_get_def_attr(scr->term->vte, &attr);
 	kmscon_text_prepare(scr->txt, &attr);
@@ -148,13 +428,35 @@ static void do_redraw_screen(struct screen *scr)
 
 	ret = uterm_display_swap(scr->disp);
 	if (ret) {
-		if (ret != -EBUSY)
-			log_warning("cannot swap display [%s] %d", uterm_display_name(scr->disp),
-				    ret);
+		if (ret == -EBUSY) {
+			bool disp_swapping = uterm_display_is_swapping(scr->disp);
+
+			scr->pending = true;
+			scr->swapping = disp_swapping;
+			if (disp_swapping) {
+				TERM_LOG_DEBUG("redraw swap busy display=%s reason=%s",
+					       uterm_display_name(scr->disp),
+					       scr->term->redraw_reason ? scr->term->redraw_reason
+										: "none");
+			} else {
+				TERM_LOG_DEBUG("redraw swap busy (no pageflip) display=%s reason=%s",
+					       uterm_display_name(scr->disp),
+					       scr->term->redraw_reason ? scr->term->redraw_reason
+										: "none");
+				schedule_redraw_with_reason(scr->term, "swap-busy");
+			}
+			return;
+		}
+		TERM_LOG_WARNING("redraw swap failed display=%s err=%d reason=%s",
+				 uterm_display_name(scr->disp), ret,
+				 scr->term->redraw_reason ? scr->term->redraw_reason : "none");
 		return;
 	}
 
 	scr->swapping = true;
+	TERM_LOG_DEBUG("redraw swap ok display=%s reason=%s",
+		       uterm_display_name(scr->disp),
+		       scr->term->redraw_reason ? scr->term->redraw_reason : "none");
 }
 
 static void redraw_screen(struct screen *scr)
@@ -162,9 +464,19 @@ static void redraw_screen(struct screen *scr)
 	if (!scr->term->awake)
 		return;
 
-	if (scr->swapping)
+	if (scr->swapping && !uterm_display_is_swapping(scr->disp)) {
+		TERM_LOG_WARNING("redraw desync: clearing swapping state display=%s pending=%d",
+				 uterm_display_name(scr->disp), scr->pending);
+		scr->swapping = false;
+	}
+
+	if (scr->swapping) {
+		TERM_LOG_DEBUG("redraw defer: swapping display=%s disp_swapping=%d pending=%d reason=%s",
+			       uterm_display_name(scr->disp),
+			       uterm_display_is_swapping(scr->disp), scr->pending,
+			       scr->term->redraw_reason ? scr->term->redraw_reason : "none");
 		scr->pending = true;
-	else
+	} else
 		do_redraw_screen(scr);
 }
 
@@ -179,32 +491,63 @@ static void redraw_timer_cb(struct ev_timer *timer, uint64_t exp, void *data)
 
 	if (term->redraw_pending && term->awake) {
 		term->redraw_pending = false;
+		TERM_LOG_DEBUG("redraw tick seq=%lu reason=%s", term->redraw_seq,
+			       term->redraw_reason ? term->redraw_reason : "none");
 		redraw_all(term);
+	} else {
+		TERM_LOG_DEBUG("redraw tick skipped pending=%d awake=%d", term->redraw_pending,
+			       term->awake);
 	}
 }
 
-static void schedule_redraw(struct kmscon_terminal *term)
+static void schedule_redraw_with_reason(struct kmscon_terminal *term, const char *reason)
 {
 	struct itimerspec spec;
 
-	if (!term->awake)
+	if (!term->awake) {
+		TERM_LOG_DEBUG("redraw schedule skip: not awake reason=%s", reason);
 		return;
+	}
 
-	if (term->redraw_pending)
+	if (term->redraw_pending) {
+		if (term->redraw_reason != reason)
+			term->redraw_reason = reason;
+
+		if (!term->redraw_scheduled) {
+			term->redraw_scheduled = true;
+
+			/* Schedule redraw after 16.6ms (60Hz) */
+			spec.it_value.tv_sec = 0;
+			spec.it_value.tv_nsec = 16666666; /* 16.6ms */
+			spec.it_interval.tv_sec = 0;
+			spec.it_interval.tv_nsec = 0;
+
+			ev_timer_update(term->redraw_timer, &spec);
+			TERM_LOG_DEBUG("redraw rescheduled seq=%lu reason=%s",
+				       term->redraw_seq, term->redraw_reason);
+		} else {
+			TERM_LOG_DEBUG("redraw schedule skip: pending reason=%s pending_reason=%s",
+				       reason,
+				       term->redraw_reason ? term->redraw_reason : "none");
+		}
 		return;
+	}
 
 	term->redraw_pending = true;
+	term->redraw_reason = reason;
+	term->redraw_seq++;
 
 	if (!term->redraw_scheduled) {
 		term->redraw_scheduled = true;
 
 		/* Schedule redraw after 16.6ms (60Hz) */
 		spec.it_value.tv_sec = 0;
-		spec.it_value.tv_nsec = 1000000000/30; /* 16.6ms */
+		spec.it_value.tv_nsec = 16666666; /* 16.6ms */
 		spec.it_interval.tv_sec = 0;
 		spec.it_interval.tv_nsec = 0;
 
 		ev_timer_update(term->redraw_timer, &spec);
+		TERM_LOG_DEBUG("redraw scheduled seq=%lu reason=%s", term->redraw_seq, reason);
 	}
 }
 
@@ -213,8 +556,11 @@ static void redraw_all(struct kmscon_terminal *term)
 	struct shl_dlist *iter;
 	struct screen *scr;
 
-	if (!term->awake)
+	if (!term->awake) {
+		TERM_LOG_DEBUG("redraw_all skip: not awake reason=%s",
+			       term->redraw_reason ? term->redraw_reason : "none");
 		return;
+	}
 
 	shl_dlist_for_each(iter, &term->screens)
 	{
@@ -304,6 +650,8 @@ static void display_event(struct uterm_display *disp, struct uterm_display_event
 	if (ev->action != UTERM_PAGE_FLIP)
 		return;
 
+	TERM_LOG_DEBUG("page flip display=%s pending=%d",
+		       uterm_display_name(scr->disp), scr->pending);
 	scr->swapping = false;
 	if (scr->pending)
 		do_redraw_screen(scr);
@@ -372,7 +720,7 @@ static void terminal_update_size_notify(struct kmscon_terminal *term)
 	if (terminal_update_size(term)) {
 		tsm_screen_resize(term->console, term->min_cols, term->min_rows);
 		kmscon_pty_resize(term->pty, term->min_cols, term->min_rows);
-		schedule_redraw(term);
+		schedule_redraw_with_reason(term, "size-change");
 	}
 }
 
@@ -570,9 +918,20 @@ static void rm_display(struct kmscon_terminal *term, struct uterm_display *disp)
 static void input_event(struct uterm_input *input, struct uterm_input_key_event *ev, void *data)
 {
 	struct kmscon_terminal *term = data;
+	bool fg = kmscon_session_get_foreground(term->session);
+	uint32_t keysym0 = 0;
+	uint32_t codepoint0 = 0;
 
-	if (!term->opened || !term->awake || ev->handled ||
-	    !kmscon_session_get_foreground(term->session))
+	if (ev->num_syms > 0) {
+		keysym0 = ev->keysyms[0];
+		codepoint0 = ev->codepoints[0];
+	}
+
+	TERM_LOG_DEBUG("key event keycode=%u ascii=%u mods=0x%x num_syms=%u keysym0=0x%x codepoint0=0x%x handled=%d opened=%d awake=%d fg=%d",
+		       ev->keycode, ev->ascii, ev->mods, ev->num_syms, keysym0, codepoint0,
+		       ev->handled, term->opened, term->awake, fg);
+
+	if (!term->opened || !term->awake || ev->handled || !fg)
 		return;
 
 	/* Skip processing for modifier-only keys (no actual key symbol) */
@@ -590,25 +949,25 @@ static void input_event(struct uterm_input *input, struct uterm_input_key_event 
 
 	if (conf_grab_matches(term->conf->grab_scroll_up, ev->mods, ev->num_syms, ev->keysyms)) {
 		tsm_screen_sb_up(term->console, 1);
-		schedule_redraw(term);
+		schedule_redraw_with_reason(term, "key-scroll-up");
 		ev->handled = true;
 		return;
 	}
 	if (conf_grab_matches(term->conf->grab_scroll_down, ev->mods, ev->num_syms, ev->keysyms)) {
 		tsm_screen_sb_down(term->console, 1);
-		schedule_redraw(term);
+		schedule_redraw_with_reason(term, "key-scroll-down");
 		ev->handled = true;
 		return;
 	}
 	if (conf_grab_matches(term->conf->grab_page_up, ev->mods, ev->num_syms, ev->keysyms)) {
 		tsm_screen_sb_page_up(term->console, 1);
-		schedule_redraw(term);
+		schedule_redraw_with_reason(term, "key-page-up");
 		ev->handled = true;
 		return;
 	}
 	if (conf_grab_matches(term->conf->grab_page_down, ev->mods, ev->num_syms, ev->keysyms)) {
 		tsm_screen_sb_page_down(term->console, 1);
-		schedule_redraw(term);
+		schedule_redraw_with_reason(term, "key-page-down");
 		ev->handled = true;
 		return;
 	}
@@ -760,6 +1119,15 @@ static void pointer_event(struct uterm_input *input, struct uterm_input_pointer_
 	struct kmscon_terminal *term = data;
 	unsigned int old_posx, old_posy;
 
+	if (!term->opened || !term->awake || !kmscon_session_get_foreground(term->session))
+		return;
+
+	TERM_LOG_DEBUG("pointer event type=%u button=%u pressed=%d wheel=%d x=%d y=%d posx=%u posy=%u visible=%d select=%d mouse_mode=%d",
+		       ev->event, ev->button, ev->pressed, ev->wheel, term->pointer.x,
+		       term->pointer.y, term->pointer.posx, term->pointer.posy,
+		       term->pointer.visible, term->pointer.select,
+		       tsm_vte_get_mouse_mode(term->vte));
+
 	if (ev->event == UTERM_MOVED) {
 		term->pointer.x = ev->pointer_x;
 		term->pointer.y = ev->pointer_y;
@@ -769,11 +1137,18 @@ static void pointer_event(struct uterm_input *input, struct uterm_input_pointer_
 		coord_to_cell(term, term->pointer.x, term->pointer.y, &term->pointer.posx,
 			      &term->pointer.posy);
 		term->pointer.visible = true;
+		damage_pointer_cell(term, old_posx, old_posy);
 
 		/* Early handling for selection updates - avoid redundant processing */
 		if (term->pointer.select && (old_posx != term->pointer.posx || old_posy != term->pointer.posy)) {
 			update_selection(term->console, term->pointer.posx, term->pointer.posy);
 		}
+	}
+	if (ev->event == UTERM_BUTTON || ev->event == UTERM_WHEEL) {
+		term->pointer.x = ev->pointer_x;
+		term->pointer.y = ev->pointer_y;
+		coord_to_cell(term, term->pointer.x, term->pointer.y, &term->pointer.posx,
+			      &term->pointer.posy);
 	}
 
 	if (tsm_vte_get_mouse_mode(term->vte) != TSM_MOUSE_TRACK_DISABLE &&
@@ -790,6 +1165,7 @@ static void pointer_event(struct uterm_input *input, struct uterm_input_pointer_
 		break;
 	case UTERM_BUTTON:
 		handle_pointer_button(term, ev);
+		schedule_redraw_with_reason(term, "pointer-button");
 		break;
 	case UTERM_WHEEL:
 		tsm_screen_selection_reset(term->console);
@@ -797,13 +1173,37 @@ static void pointer_event(struct uterm_input *input, struct uterm_input_pointer_
 			tsm_screen_sb_up(term->console, 3);
 		else
 			tsm_screen_sb_down(term->console, 3);
+		schedule_redraw_with_reason(term, "pointer-wheel");
 		break;
 	case UTERM_SYNC:
-		schedule_redraw(term);
+	{
+		bool needs_redraw;
+		const char *reason;
+
+		needs_redraw = update_hw_cursor_all(term);
+		if (term->pointer.select) {
+			needs_redraw = true;
+			reason = "pointer-select";
+		} else {
+			reason = "pointer-sync";
+		}
+
+		if (needs_redraw) {
+			schedule_redraw_with_reason(term, reason);
+		} else {
+			TERM_LOG_DEBUG("redraw skip: hw cursor updated reason=%s", reason);
+		}
 		break;
+	}
 	case UTERM_HIDE_TIMEOUT:
 		tsm_screen_selection_reset(term->console);
 		term->pointer.visible = false;
+		damage_pointer_cell(term, term->pointer.posx, term->pointer.posy);
+		if (update_hw_cursor_all(term)) {
+			schedule_redraw_with_reason(term, "pointer-hide");
+		} else {
+			TERM_LOG_DEBUG("redraw skip: hw cursor updated reason=pointer-hide");
+		}
 		break;
 	}
 }
@@ -840,7 +1240,7 @@ static int terminal_open(struct kmscon_terminal *term)
 	term->opened = true;
 
 	update_pointer_max_all(term);
-	schedule_redraw(term);
+	schedule_redraw_with_reason(term, "terminal-open");
 	return 0;
 }
 
@@ -868,6 +1268,11 @@ static void terminal_destroy(struct kmscon_terminal *term)
 	uterm_input_unref(term->input);
 	ev_eloop_unref(term->eloop);
 	free(term);
+
+	if (terminal_log_users > 0)
+		terminal_log_users--;
+	if (terminal_log_users == 0)
+		terminal_tmp_log_close();
 }
 
 static int session_event(struct kmscon_session *session, struct kmscon_session_event *ev,
@@ -911,7 +1316,7 @@ static void pty_input(struct kmscon_pty *pty, const char *u8, size_t len, void *
 		terminal_open(term);
 	} else {
 		tsm_vte_input(term->vte, u8, len);
-		schedule_redraw(term);
+		schedule_redraw_with_reason(term, "pty-input");
 	}
 }
 
@@ -1016,6 +1421,7 @@ int kmscon_terminal_register(struct kmscon_session **out, struct kmscon_seat *se
 		goto err_pointer;
 	}
 
+	terminal_log_users++;
 	ev_eloop_ref(term->eloop);
 	uterm_input_ref(term->input);
 	*out = term->session;

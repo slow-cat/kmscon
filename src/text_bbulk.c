@@ -481,6 +481,12 @@ static int bblit_draw_pointer(struct kmscon_text *txt, unsigned int pointer_x,
 
 	int ret;
 
+	ret = uterm_display_move_cursor(txt->disp, pointer_x, pointer_y);
+	if (ret == 0)
+		return 0;
+	if (ret != -EOPNOTSUPP)
+		return 0;
+
 	if (bb->req_len >= bb->req_total_len)
 		return -ENOMEM;
 
@@ -504,6 +510,18 @@ static int bblit_draw_pointer(struct kmscon_text *txt, unsigned int pointer_x,
 	req->bg = bb->attr.bg;
 	req->bb = bb->attr.bb;
 	return 0;
+}
+
+static void bbulk_damage_cell(struct kmscon_text *txt, unsigned int posx, unsigned int posy)
+{
+	struct bbulk *bb = txt->data;
+	unsigned int off;
+
+	if (posx >= txt->cols || posy >= txt->rows)
+		return;
+
+	off = posx + posy * txt->cols;
+	damage_cell(bb, off);
 }
 
 static void add_damage(struct bbulk *bb, struct uterm_video_rect *r)
@@ -628,6 +646,8 @@ struct kmscon_text_ops kmscon_text_bbulk_ops = {
 	.prepare = bbulk_prepare,
 	.draw = bbulk_draw,
 	.draw_pointer = bblit_draw_pointer,
+	.damage_cell = bbulk_damage_cell,
+	.set_offscreen = NULL,
 	.render = bbulk_render,
 	.abort = NULL,
 };

@@ -30,10 +30,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <sys/mman.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <libdrm/drm_fourcc.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include "shl_dlist.h"
@@ -45,6 +47,8 @@
 #include "uterm_video_internal.h"
 
 #define LOG_SUBSYSTEM "drm_shared"
+
+static void drm_cursor_free_buffer(int fd, struct uterm_drm_display *ddrm);
 
 static uint32_t get_property_id(int fd, drmModeObjectPropertiesPtr props, const char *name)
 {
@@ -355,6 +359,7 @@ void uterm_drm_display_free_properties(struct uterm_display *disp)
 	struct uterm_drm_display *ddrm = disp->data;
 	struct uterm_drm_video *vdrm = disp->video->data;
 
+	drm_cursor_free_buffer(vdrm->fd, ddrm);
 	modeset_drm_object_fini(&ddrm->connector);
 	modeset_drm_object_fini(&ddrm->crtc);
 	modeset_drm_object_fini(&ddrm->plane);
@@ -425,6 +430,17 @@ static void free_damage_blob(int fd, struct uterm_drm_display *ddrm)
 	if (drmModeDestroyPropertyBlob(fd, ddrm->damage_blob_id))
 		log_warn("Failed to destroy damage property blob");
 	ddrm->damage_blob_id = 0;
+}
+
+static void uterm_drm_display_cancel_flip(struct uterm_display *disp)
+{
+	if (!disp)
+		return;
+
+	if (disp->flags & DISPLAY_VSYNC) {
+		disp->flags &= ~(DISPLAY_PFLIP | DISPLAY_VSYNC);
+		uterm_display_unref(disp);
+	}
 }
 
 int uterm_drm_set_dpms(int fd, uint32_t conn_id, int state)
@@ -537,6 +553,9 @@ int uterm_drm_display_set_dpms(struct uterm_display *disp, int state)
 		return ret;
 
 	disp->dpms = ret;
+	if (disp->dpms != UTERM_DPMS_ON)
+		uterm_drm_display_cancel_flip(disp);
+	ddrm->need_redraw = true;
 	return 0;
 }
 
@@ -627,6 +646,11 @@ static int modeset_find_cursor_plane(int fd, struct uterm_drm_display *ddrm)
 		if (!plane)
 			continue;
 
+		if (!(plane->possible_crtcs & (1u << ddrm->crtc_index))) {
+			drmModeFreePlane(plane);
+			continue;
+		}
+
 		props = drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE);
 		if (!props) {
 			drmModeFreePlane(plane);
@@ -635,11 +659,6 @@ static int modeset_find_cursor_plane(int fd, struct uterm_drm_display *ddrm)
 
 		/* only cursor planes */
 		if (get_property_value(fd, props, "type") == DRM_PLANE_TYPE_CURSOR) {
-			/*
-			 * NOTE: Ideally also check plane->possible_crtcs against this display's
-			 * CRTC. Many systems have one cursor plane per CRTC anyway, so picking the
-			 * first one often works. We'll keep it minimal for now.
-			 */
 			ddrm->cursor_plane.id = plane_id;
 			ddrm->cursor_valid = true;
 
@@ -682,39 +701,6 @@ static int drm_cursor_disable(int fd, drmModeAtomicReq *req, struct uterm_drm_di
 
 	drmModeFreeObjectProperties(props);
 
-	ddrm->cursor_enabled = false;
-	return 0;
-}
-
-static int drm_cursor_move(int fd, drmModeAtomicReq *req, struct uterm_drm_display *ddrm, int x,
-			   int y)
-{
-	drmModeObjectPropertiesPtr props;
-	uint32_t prop_x, prop_y;
-
-	if (!ddrm || !ddrm->cursor_valid || !ddrm->cursor_plane.id)
-		return -ENOENT;
-
-	/* apply hotspot */
-	x -= ddrm->hot_x;
-	y -= ddrm->hot_y;
-
-	props = drmModeObjectGetProperties(fd, ddrm->cursor_plane.id, DRM_MODE_OBJECT_PLANE);
-	if (!props)
-		return -EFAULT;
-
-	prop_x = get_property_id(fd, props, "CRTC_X");
-	prop_y = get_property_id(fd, props, "CRTC_Y");
-
-	if (!prop_x || !prop_y) {
-		drmModeFreeObjectProperties(props);
-		return -EOPNOTSUPP;
-	}
-
-	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, prop_x, x);
-	drmModeAtomicAddProperty(req, ddrm->cursor_plane.id, prop_y, y);
-
-	drmModeFreeObjectProperties(props);
 	return 0;
 }
 
@@ -771,10 +757,384 @@ static int drm_cursor_enable(int fd, drmModeAtomicReq *req, struct uterm_drm_dis
 
 	drmModeFreeObjectProperties(props);
 
-	ddrm->cursor_enabled = true;
 	ddrm->cursor_fb_id = fb_id;
 	ddrm->cursor_w = w;
 	ddrm->cursor_h = h;
+	return 0;
+}
+
+static void drm_cursor_free_buffer(int fd, struct uterm_drm_display *ddrm)
+{
+	int ret;
+
+	if (!ddrm)
+		return;
+
+	if (ddrm->cursor_map && ddrm->cursor_size)
+		munmap(ddrm->cursor_map, ddrm->cursor_size);
+	ddrm->cursor_map = NULL;
+
+	if (ddrm->cursor_fb_id) {
+		ret = drmModeRmFB(fd, ddrm->cursor_fb_id);
+		if (ret)
+			log_warn("cannot remove cursor fb (%d/%d): %m", ret, errno);
+		ddrm->cursor_fb_id = 0;
+	}
+
+	if (ddrm->cursor_handle) {
+		ret = drmModeDestroyDumbBuffer(fd, ddrm->cursor_handle);
+		if (ret)
+			log_warn("cannot destroy cursor buffer (%d/%d): %m", ret, errno);
+		ddrm->cursor_handle = 0;
+	}
+
+	ddrm->cursor_enabled = false;
+	ddrm->cursor_stride = 0;
+	ddrm->cursor_size = 0;
+	ddrm->cursor_w = 0;
+	ddrm->cursor_h = 0;
+	ddrm->cursor_x = 0;
+	ddrm->cursor_y = 0;
+}
+
+static void drm_cursor_fill_default(struct uterm_drm_display *ddrm, int w, int h)
+{
+	static const uint16_t cursor_mask[16] = {
+		0x0001, 0x0003, 0x0007, 0x000f,
+		0x001f, 0x003f, 0x007f, 0x00ff,
+		0x01ff, 0x01f0, 0x03e0, 0x07c0,
+		0x0f80, 0x1f00, 0x3e00, 0x7c00,
+	};
+	uint8_t *dst;
+	int y, x;
+
+	if (!ddrm->cursor_map || !ddrm->cursor_stride)
+		return;
+
+	memset(ddrm->cursor_map, 0, ddrm->cursor_size);
+	dst = ddrm->cursor_map;
+
+	for (y = 0; y < h && y < 16; y++) {
+		uint32_t *row = (uint32_t *)(dst + (size_t)y * ddrm->cursor_stride);
+		uint16_t mask = cursor_mask[y] & ((w >= 16) ? 0xffff : ((1u << w) - 1));
+
+		for (x = 0; x < w && x < 16; x++) {
+			if (mask & (1u << x))
+				row[x] = 0xffffffff;
+		}
+	}
+}
+
+static int drm_cursor_alloc_buffer(int fd, struct uterm_drm_display *ddrm, int w, int h)
+{
+	uint32_t handles[4];
+	uint32_t pitches[4];
+	uint32_t offsets[4];
+	uint64_t mmap_offset;
+	int ret, r;
+
+	if (w <= 0 || h <= 0)
+		return -EINVAL;
+
+	if (ddrm->cursor_handle && ddrm->cursor_w == w && ddrm->cursor_h == h)
+		return 0;
+
+	drm_cursor_free_buffer(fd, ddrm);
+
+	if (drmModeCreateDumbBuffer(fd, w, h, 32, 0, &ddrm->cursor_handle,
+				    &ddrm->cursor_stride, &ddrm->cursor_size)) {
+		log_err("cannot create cursor dumb buffer");
+		return -EFAULT;
+	}
+
+	memset(handles, 0, sizeof(handles));
+	memset(pitches, 0, sizeof(pitches));
+	memset(offsets, 0, sizeof(offsets));
+	handles[0] = ddrm->cursor_handle;
+	pitches[0] = ddrm->cursor_stride;
+
+	ret = drmModeAddFB2(fd, w, h, DRM_FORMAT_ARGB8888, handles, pitches, offsets,
+			    &ddrm->cursor_fb_id, 0);
+	if (ret) {
+		log_err("cannot add cursor fb");
+		ret = -EFAULT;
+		goto err_buf;
+	}
+
+	ret = drmModeMapDumbBuffer(fd, ddrm->cursor_handle, &mmap_offset);
+	if (ret) {
+		log_err("cannot map cursor buffer");
+		ret = -EFAULT;
+		goto err_fb;
+	}
+
+	ddrm->cursor_map = mmap(0, ddrm->cursor_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+				mmap_offset);
+	if (ddrm->cursor_map == MAP_FAILED) {
+		log_err("cannot mmap cursor buffer");
+		ddrm->cursor_map = NULL;
+		ret = -EFAULT;
+		goto err_fb;
+	}
+
+	ddrm->cursor_w = w;
+	ddrm->cursor_h = h;
+	return 0;
+
+err_fb:
+	drmModeRmFB(fd, ddrm->cursor_fb_id);
+	ddrm->cursor_fb_id = 0;
+err_buf:
+	r = drmModeDestroyDumbBuffer(fd, ddrm->cursor_handle);
+	if (r)
+		log_warn("cannot destroy cursor buffer (%d/%d): %m", r, errno);
+	ddrm->cursor_handle = 0;
+	ddrm->cursor_stride = 0;
+	ddrm->cursor_size = 0;
+	return ret;
+}
+
+static void drm_cursor_upload(struct uterm_drm_display *ddrm, const uint8_t *argb, int w, int h)
+{
+	uint8_t *dst;
+	const uint8_t *src;
+	int y;
+
+	if (!ddrm->cursor_map || !ddrm->cursor_stride)
+		return;
+
+	if (!argb) {
+		drm_cursor_fill_default(ddrm, w, h);
+		return;
+	}
+
+	dst = ddrm->cursor_map;
+	src = argb;
+	for (y = 0; y < h; y++) {
+		memcpy(dst + (size_t)y * ddrm->cursor_stride, src + (size_t)y * w * 4, w * 4);
+	}
+}
+
+/**
+ * Clamp cursor hotspot to valid pixel coordinates.
+ */
+static inline void drm_cursor_clamp_hotspot(int *hot_x, int *hot_y, int w, int h)
+{
+	if (*hot_x < 0)
+		*hot_x = 0;
+	if (*hot_y < 0)
+		*hot_y = 0;
+	if (*hot_x >= w)
+		*hot_x = w - 1;
+	if (*hot_y >= h)
+		*hot_y = h - 1;
+}
+
+/**
+ * Ensure cursor buffer exists and upload content if needed.
+ */
+static inline int drm_cursor_prepare_buffer(struct uterm_drm_video *vdrm,
+					    struct uterm_drm_display *ddrm,
+					    const uint8_t *argb, int w, int h,
+					    uint32_t prev_fb, int prev_w, int prev_h)
+{
+	int ret;
+
+	ret = drm_cursor_alloc_buffer(vdrm->fd, ddrm, w, h);
+	if (ret)
+		return ret;
+
+	if (argb || !prev_fb || prev_w != w || prev_h != h)
+		drm_cursor_upload(ddrm, argb, w, h);
+
+	return 0;
+}
+
+/**
+ * Enable cursor for legacy (non-atomic) paths.
+ */
+static inline int drm_cursor_enable_legacy(struct uterm_drm_video *vdrm,
+					   struct uterm_drm_display *ddrm,
+					   int w, int h, int hot_x, int hot_y)
+{
+	int ret;
+
+	ret = drmModeSetCursor2(vdrm->fd, ddrm->crtc.id, ddrm->cursor_handle, w, h, hot_x, hot_y);
+	if (ret)
+		return ret;
+
+	ddrm->cursor_enabled = true;
+	return 0;
+}
+
+int uterm_drm_display_set_cursor(struct uterm_display *disp, const uint8_t *argb, int w, int h,
+				 int hot_x, int hot_y)
+{
+	struct uterm_drm_video *vdrm;
+	struct uterm_drm_display *ddrm;
+	uint32_t prev_fb;
+	int prev_w;
+	int prev_h;
+	int ret;
+
+	if (!disp || w <= 0 || h <= 0)
+		return -EINVAL;
+
+	vdrm = disp->video->data;
+	ddrm = disp->data;
+
+	if (!vdrm)
+		return -EINVAL;
+
+	if (!vdrm->legacy && (!ddrm->cursor_valid || !ddrm->cursor_plane.id))
+		return -EOPNOTSUPP;
+
+	prev_fb = ddrm->cursor_fb_id;
+	prev_w = ddrm->cursor_w;
+	prev_h = ddrm->cursor_h;
+
+	ret = drm_cursor_prepare_buffer(vdrm, ddrm, argb, w, h, prev_fb, prev_w, prev_h);
+	if (ret)
+		return ret;
+
+	drm_cursor_clamp_hotspot(&hot_x, &hot_y, w, h);
+	ddrm->hot_x = hot_x;
+	ddrm->hot_y = hot_y;
+
+	if (vdrm->legacy)
+	{
+		ret = drm_cursor_enable_legacy(vdrm, ddrm, w, h, hot_x, hot_y);
+		if (!ret) {
+			ddrm->cursor_want_enabled = true;
+			ddrm->cursor_dirty = false;
+		}
+		return ret;
+	}
+
+	if (!ddrm->cursor_valid || !ddrm->cursor_plane.id)
+		return -EOPNOTSUPP;
+
+	ddrm->cursor_want_enabled = true;
+	ddrm->cursor_dirty = true;
+	return 0;
+}
+
+int uterm_drm_display_move_cursor(struct uterm_display *disp, int x, int y)
+{
+	struct uterm_drm_video *vdrm;
+	struct uterm_drm_display *ddrm;
+	int ret;
+
+	if (!disp)
+		return -EINVAL;
+
+	vdrm = disp->video->data;
+	ddrm = disp->data;
+	if (!vdrm)
+		return -EINVAL;
+
+	ddrm->cursor_x = x;
+	ddrm->cursor_y = y;
+
+	if (vdrm->legacy) {
+		ret = drmModeMoveCursor(vdrm->fd, ddrm->crtc.id, x - ddrm->hot_x, y - ddrm->hot_y);
+		if (ret)
+			return ret;
+		return 0;
+	}
+
+	if (!ddrm->cursor_valid || !ddrm->cursor_plane.id)
+		return -EOPNOTSUPP;
+	if (ddrm->cursor_want_enabled)
+		ddrm->cursor_dirty = true;
+	return 0;
+}
+
+int uterm_drm_display_hide_cursor(struct uterm_display *disp)
+{
+	struct uterm_drm_video *vdrm;
+	struct uterm_drm_display *ddrm;
+	int ret;
+
+	if (!disp)
+		return -EINVAL;
+
+	vdrm = disp->video->data;
+	ddrm = disp->data;
+	if (!vdrm)
+		return -EINVAL;
+
+	if (vdrm->legacy) {
+		if (!ddrm->cursor_enabled)
+			return 0;
+		ret = drmModeSetCursor(vdrm->fd, ddrm->crtc.id, 0, 0, 0);
+		if (ret)
+			return ret;
+		ddrm->cursor_enabled = false;
+		ddrm->cursor_want_enabled = false;
+		ddrm->cursor_dirty = false;
+		return 0;
+	}
+
+	if (!ddrm->cursor_valid || !ddrm->cursor_plane.id)
+		return -EOPNOTSUPP;
+
+	if (!ddrm->cursor_want_enabled && !ddrm->cursor_dirty)
+		return 0;
+
+	ddrm->cursor_want_enabled = false;
+	ddrm->cursor_dirty = true;
+	return 0;
+}
+
+int uterm_drm_display_flush_cursor(struct uterm_display *disp)
+{
+	struct uterm_drm_video *vdrm;
+	struct uterm_drm_display *ddrm;
+	drmModeAtomicReq *req;
+	int ret;
+
+	if (!disp)
+		return -EINVAL;
+
+	vdrm = disp->video->data;
+	ddrm = disp->data;
+	if (!vdrm || !ddrm)
+		return -EINVAL;
+
+	if (vdrm->legacy)
+		return 0;
+
+	if (!ddrm->cursor_dirty)
+		return 0;
+
+	if (!ddrm->cursor_valid || !ddrm->cursor_plane.id)
+		return -EOPNOTSUPP;
+
+	if (disp->flags & DISPLAY_VSYNC)
+		return -EBUSY;
+
+	req = drmModeAtomicAlloc();
+	if (!req)
+		return -ENOMEM;
+
+	if (ddrm->cursor_want_enabled) {
+		ret = drm_cursor_enable(vdrm->fd, req, ddrm, ddrm->crtc.id, ddrm->cursor_fb_id,
+					ddrm->cursor_x, ddrm->cursor_y, ddrm->cursor_w,
+					ddrm->cursor_h);
+	} else {
+		ret = drm_cursor_disable(vdrm->fd, req, ddrm);
+	}
+
+	if (!ret)
+		ret = drmModeAtomicCommit(vdrm->fd, req, DRM_MODE_ATOMIC_NONBLOCK, NULL);
+	drmModeAtomicFree(req);
+
+	if (ret)
+		return ret;
+
+	ddrm->cursor_enabled = ddrm->cursor_want_enabled;
+	ddrm->cursor_dirty = false;
 	return 0;
 }
 
@@ -1029,10 +1389,10 @@ static void display_event(int fd, unsigned int frame, unsigned int sec, unsigned
 		disp = shl_dlist_entry(iter, struct uterm_display, list);
 		ddrm = disp->data;
 		if (ddrm->crtc.id == crtc_id) {
-			if (disp->flags & DISPLAY_VSYNC)
+			if (disp->flags & DISPLAY_VSYNC) {
 				disp->flags |= DISPLAY_PFLIP;
-
-			uterm_display_unref(disp);
+				uterm_display_unref(disp);
+			}
 			return;
 		}
 	}
@@ -1458,6 +1818,18 @@ int uterm_drm_video_wake_up(struct uterm_video *video)
 void uterm_drm_video_sleep(struct uterm_video *video)
 {
 	struct uterm_drm_video *vdrm = video->data;
+	struct shl_dlist *iter;
+	struct uterm_display *disp;
+	struct uterm_drm_display *ddrm;
+
+	/* Clear stale page-flip state so redraws won't get stuck after wake-up. */
+	shl_dlist_for_each(iter, &video->displays)
+	{
+		disp = shl_dlist_entry(iter, struct uterm_display, list);
+		uterm_drm_display_cancel_flip(disp);
+		ddrm = disp->data;
+		ddrm->need_redraw = true;
+	}
 
 	drmDropMaster(vdrm->fd);
 	ev_timer_drain(vdrm->vt_timer, NULL);

@@ -44,6 +44,8 @@ static void pointer_dev_send_wheel(struct uterm_input_dev *dev, int32_t value)
 
 	pev.event = UTERM_WHEEL;
 	pev.wheel = value;
+	pev.pointer_x = dev->pointer.x;
+	pev.pointer_y = dev->pointer.y;
 
 	shl_hook_call(dev->input->pointer_hook, dev->input, &pev);
 }
@@ -57,6 +59,8 @@ static void pointer_dev_send_button(struct uterm_input_dev *dev, uint8_t button,
 	pev.button = button;
 	pev.pressed = pressed;
 	pev.double_click = dbl_click;
+	pev.pointer_x = dev->pointer.x;
+	pev.pointer_y = dev->pointer.y;
 
 	shl_hook_call(dev->input->pointer_hook, dev->input, &pev);
 }
@@ -64,6 +68,9 @@ static void pointer_dev_send_button(struct uterm_input_dev *dev, uint8_t button,
 void pointer_dev_sync(struct uterm_input_dev *dev)
 {
 	struct uterm_input_pointer_event pev = {0};
+
+	if (dev->pointer.kind == POINTER_NONE)
+		return;
 
 	pev.event = UTERM_SYNC;
 

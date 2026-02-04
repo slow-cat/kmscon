@@ -159,6 +159,7 @@ int kmscon_text_new(struct kmscon_text **out, const char *backend, const char *r
 		return -ENOMEM;
 	}
 
+	text->offscreen = false;
 	text->orientation = OR_NORMAL;
 
 	if (rotate) {
@@ -470,6 +471,46 @@ int kmscon_text_draw_pointer(struct kmscon_text *txt, unsigned int x, unsigned i
 		return -EINVAL;
 
 	return txt->ops->draw_pointer(txt, x, y);
+}
+
+/**
+ * kmscon_text_damage_cell:
+ * @txt: valid text renderer
+ * @posx: cell x coordinate
+ * @posy: cell y coordinate
+ *
+ * Marks a single cell as damaged, so it will be redrawn on the next frame.
+ */
+void kmscon_text_damage_cell(struct kmscon_text *txt, unsigned int posx, unsigned int posy)
+{
+	if (!txt || !txt->ops->damage_cell)
+		return;
+
+	txt->ops->damage_cell(txt, posx, posy);
+}
+
+/**
+ * kmscon_text_set_offscreen:
+ * @txt: valid text renderer
+ * @enable: whether offscreen rendering should be enabled
+ *
+ * Requests the renderer to enable or disable offscreen rendering.
+ *
+ * Returns: 0 on success, negative error on failure.
+ */
+int kmscon_text_set_offscreen(struct kmscon_text *txt, bool enable)
+{
+	if (!txt)
+		return -EINVAL;
+
+	if (txt->offscreen == enable && !txt->ops->set_offscreen)
+		return 0;
+
+	txt->offscreen = enable;
+	if (txt->ops->set_offscreen)
+		txt->ops->set_offscreen(txt, enable);
+
+	return 0;
 }
 
 /**

@@ -59,12 +59,20 @@ struct uterm_drm_display {
 
 	struct drm_object cursor_plane;
 	uint32_t cursor_fb_id;
+	uint32_t cursor_handle;
+	uint32_t cursor_stride;
+	uint64_t cursor_size;
+	void *cursor_map;
 	int cursor_w;
 	int cursor_h;
+	int cursor_x;
+	int cursor_y;
 	int hot_x;
 	int hot_y;
 	bool cursor_valid;
 	bool cursor_enabled;
+	bool cursor_dirty;
+	bool cursor_want_enabled;
 
 	drmModeModeInfo mode;
 	uint32_t mode_blob_id;
@@ -89,12 +97,45 @@ int uterm_drm_display_wait_pflip(struct uterm_display *disp);
 int uterm_drm_prepare_commit(int fd, struct uterm_drm_display *ddrm, drmModeAtomicReq *req,
 			     uint32_t fb, uint32_t width, uint32_t height);
 int uterm_drm_display_swap(struct uterm_display *disp, uint32_t fb);
+int uterm_drm_display_flush_cursor(struct uterm_display *disp);
 bool uterm_drm_is_swapping(struct uterm_display *disp);
 bool uterm_drm_display_need_redraw(struct uterm_display *disp);
 void uterm_drm_display_free_properties(struct uterm_display *disp);
 void uterm_drm_display_set_damage(struct uterm_display *disp, size_t n_rect,
 				  struct uterm_video_rect *damages);
 bool uterm_drm_display_has_damage(struct uterm_display *disp);
+/**
+ * DRM-specific cursor setup for a display.
+ *
+ * @disp Display to update.
+ * @argb Cursor buffer in ARGB8888 format. If NULL, a default cursor is used.
+ * @w Cursor width in pixels.
+ * @h Cursor height in pixels.
+ * @hot_x Hotspot x coordinate within the cursor image.
+ * @hot_y Hotspot y coordinate within the cursor image.
+ *
+ * @return 0 on success, negative error code on failure.
+ */
+int uterm_drm_display_set_cursor(struct uterm_display *disp, const uint8_t *argb, int w, int h,
+				 int hot_x, int hot_y);
+/**
+ * DRM-specific cursor move for a display.
+ *
+ * @disp Display to update.
+ * @x Cursor x coordinate in pixels.
+ * @y Cursor y coordinate in pixels.
+ *
+ * @return 0 on success, negative error code on failure.
+ */
+int uterm_drm_display_move_cursor(struct uterm_display *disp, int x, int y);
+/**
+ * DRM-specific cursor hide for a display.
+ *
+ * @disp Display to update.
+ *
+ * @return 0 on success, negative error code on failure.
+ */
+int uterm_drm_display_hide_cursor(struct uterm_display *disp);
 
 /* drm video */
 

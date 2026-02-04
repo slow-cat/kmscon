@@ -142,6 +142,7 @@ void log_set_config(const struct log_config *config);
 int log_add_filter(const struct log_filter *filter, const struct log_config *config);
 void log_rm_filter(int handle);
 void log_clean_filter();
+bool log_is_debug_enabled(void);
 
 /*
  * Log-Functions

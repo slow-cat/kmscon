@@ -353,22 +353,23 @@ bool uterm_display_has_damage(struct uterm_display *disp)
 }
 
 SHL_EXPORT
-int uterm_display_set_cursor(struct uterm_display *disp,const uint8_t*argb,int w,int h,int x,int y)
+int uterm_display_set_cursor(struct uterm_display *disp, const uint8_t *argb, int w, int h,
+			     int hot_x, int hot_y)
 {
 	if (!disp || !display_is_online(disp) || !video_is_awake(disp->video))
 		return -EINVAL;
 
-	return VIDEO_CALL(disp->ops->set_cursor,-EOPNOTSUPP,disp,argb,w,h,x,y);
+	return VIDEO_CALL(disp->ops->set_cursor, -EOPNOTSUPP, disp, argb, w, h, hot_x, hot_y);
 }
 
 
 SHL_EXPORT
-int uterm_display_move_cursor(struct uterm_display *disp, int x,int y)
+int uterm_display_move_cursor(struct uterm_display *disp, int x, int y)
 {
 	if (!disp || !display_is_online(disp) || !video_is_awake(disp->video))
 		return -EINVAL;
 
-	return VIDEO_CALL(disp->ops->move_cursor, -EOPNOTSUPP, disp,x, y);
+	return VIDEO_CALL(disp->ops->move_cursor, -EOPNOTSUPP, disp, x, y);
 }
 
 
@@ -379,6 +380,15 @@ int uterm_display_hide_cursor(struct uterm_display *disp)
 		return -EINVAL;
 
 	return VIDEO_CALL(disp->ops->hide_cursor, -EOPNOTSUPP, disp);
+}
+
+SHL_EXPORT
+int uterm_display_flush_cursor(struct uterm_display *disp)
+{
+	if (!disp || !display_is_online(disp) || !video_is_awake(disp->video))
+		return -EINVAL;
+
+	return VIDEO_CALL(disp->ops->flush_cursor, 0, disp);
 }
 
 SHL_EXPORT
