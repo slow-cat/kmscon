@@ -377,6 +377,9 @@ static const struct display_ops drm_display_ops = {
 	.fill = uterm_drm3d_display_fill,
 	.set_damage = NULL,
 	.has_damage = NULL,
+	.set_cursor = uterm_display_set_cursor,
+	.move_cursor = uterm_display_move_cursor,
+	.hide_cursor = uterm_display_hide_cursor,
 };
 
 static void show_displays(struct uterm_video *video)

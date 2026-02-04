@@ -33,6 +33,8 @@
 #ifndef UTERM_UTERM_INPUT_H
 #define UTERM_UTERM_INPUT_H
 
+#define INPUT_LEN 128
+
 #include <eloop.h>
 #include <inttypes.h>
 #include <stdbool.h>

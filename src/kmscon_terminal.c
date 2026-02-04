@@ -197,13 +197,13 @@ static void schedule_redraw(struct kmscon_terminal *term)
 
 	if (!term->redraw_scheduled) {
 		term->redraw_scheduled = true;
-		
+
 		/* Schedule redraw after 16.6ms (60Hz) */
 		spec.it_value.tv_sec = 0;
-		spec.it_value.tv_nsec = 16666666; /* 16.6ms */
+		spec.it_value.tv_nsec = 1000000000/30; /* 16.6ms */
 		spec.it_interval.tv_sec = 0;
 		spec.it_interval.tv_nsec = 0;
-		
+
 		ev_timer_update(term->redraw_timer, &spec);
 	}
 }

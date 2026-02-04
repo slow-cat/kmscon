@@ -75,7 +75,7 @@ static void notify_event(struct uterm_input_dev *dev, uint16_t type, uint16_t co
 static void input_data_dev(struct ev_fd *fd, int mask, void *data)
 {
 	struct uterm_input_dev *dev = data;
-	struct input_event ev[16];
+	struct input_event ev[INPUT_LEN];
 	ssize_t len, n;
 	int i;
 

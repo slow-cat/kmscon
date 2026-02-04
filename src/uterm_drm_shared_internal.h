@@ -28,6 +28,7 @@
 #ifndef UTERM_DRM_SHARED_INTERNAL_H
 #define UTERM_DRM_SHARED_INTERNAL_H
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -55,6 +56,15 @@ struct uterm_drm_display {
 	struct drm_object connector;
 	struct drm_object crtc;
 	struct drm_object plane;
+
+	struct drm_object cursor_plane;
+	uint32_t cursor_fb_id;
+	int cursor_w;
+	int cursor_h;
+	int hot_x;
+	int hot_y;
+	bool cursor_valid;
+	bool cursor_enabled;
 
 	drmModeModeInfo mode;
 	uint32_t mode_blob_id;

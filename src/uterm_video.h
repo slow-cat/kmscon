@@ -174,6 +174,9 @@ int uterm_display_fake_blendv(struct uterm_display *disp, const struct uterm_vid
 void uterm_display_set_damage(struct uterm_display *disp, size_t n_rect,
 			      struct uterm_video_rect *damages);
 bool uterm_display_has_damage(struct uterm_display *disp);
+int uterm_display_set_cursor(struct uterm_display *disp,const uint8_t *argb,int w,int h, int hot_x,int hot_w);
+int uterm_display_move_cursor(struct uterm_display *disp,int x,int y);
+int uterm_display_hide_cursor(struct uterm_display *disp);
 
 /* video interface */
 

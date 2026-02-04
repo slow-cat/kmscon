@@ -28,9 +28,11 @@
  * Core Implementation of the uterm_video and uterm_display objects.
  */
 
+#include <asm-generic/errno.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -348,6 +350,35 @@ bool uterm_display_has_damage(struct uterm_display *disp)
 		return false;
 
 	return VIDEO_CALL(disp->ops->has_damage, 0, disp);
+}
+
+SHL_EXPORT
+int uterm_display_set_cursor(struct uterm_display *disp,const uint8_t*argb,int w,int h,int x,int y)
+{
+	if (!disp || !display_is_online(disp) || !video_is_awake(disp->video))
+		return -EINVAL;
+
+	return VIDEO_CALL(disp->ops->set_cursor,-EOPNOTSUPP,disp,argb,w,h,x,y);
+}
+
+
+SHL_EXPORT
+int uterm_display_move_cursor(struct uterm_display *disp, int x,int y)
+{
+	if (!disp || !display_is_online(disp) || !video_is_awake(disp->video))
+		return -EINVAL;
+
+	return VIDEO_CALL(disp->ops->move_cursor, -EOPNOTSUPP, disp,x, y);
+}
+
+
+SHL_EXPORT
+int uterm_display_hide_cursor(struct uterm_display *disp)
+{
+	if (!disp || !display_is_online(disp) || !video_is_awake(disp->video))
+		return -EINVAL;
+
+	return VIDEO_CALL(disp->ops->hide_cursor, -EOPNOTSUPP, disp);
 }
 
 SHL_EXPORT
