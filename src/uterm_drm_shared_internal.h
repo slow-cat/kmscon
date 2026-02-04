@@ -97,6 +97,13 @@ int uterm_drm_display_wait_pflip(struct uterm_display *disp);
 int uterm_drm_prepare_commit(int fd, struct uterm_drm_display *ddrm, drmModeAtomicReq *req,
 			     uint32_t fb, uint32_t width, uint32_t height);
 int uterm_drm_display_swap(struct uterm_display *disp, uint32_t fb);
+/**
+ * Flush pending DRM cursor updates for a display.
+ *
+ * @disp Display to update.
+ *
+ * Returns: 0 on success, negative error code on failure.
+ */
 int uterm_drm_display_flush_cursor(struct uterm_display *disp);
 bool uterm_drm_is_swapping(struct uterm_display *disp);
 bool uterm_drm_display_need_redraw(struct uterm_display *disp);

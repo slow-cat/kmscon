@@ -496,6 +496,11 @@ void kmscon_text_damage_cell(struct kmscon_text *txt, unsigned int posx, unsigne
  *
  * Requests the renderer to enable or disable offscreen rendering.
  *
+ * Call order:
+ * - update_hw_cursor_all() decides whether software rendering is needed
+ * - kmscon_text_set_offscreen() updates renderer state
+ * - backend set_offscreen() manages GPU resources
+ *
  * Returns: 0 on success, negative error on failure.
  */
 int kmscon_text_set_offscreen(struct kmscon_text *txt, bool enable)

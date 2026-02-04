@@ -1087,6 +1087,21 @@ int uterm_drm_display_hide_cursor(struct uterm_display *disp)
 	return 0;
 }
 
+/**
+ * Flush pending cursor state to the DRM cursor plane.
+ *
+ * Call order (atomic path):
+ * - uterm_drm_display_set_cursor()
+ * - uterm_drm_display_move_cursor() or uterm_drm_display_hide_cursor()
+ * - uterm_drm_display_flush_cursor()
+ *
+ * This function is typically called once per input sync from
+ * update_hw_cursor_all() to avoid competing atomic commits.
+ *
+ * @disp Display to update.
+ *
+ * Returns: 0 on success, negative error code on failure.
+ */
 int uterm_drm_display_flush_cursor(struct uterm_display *disp)
 {
 	struct uterm_drm_video *vdrm;

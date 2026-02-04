@@ -203,6 +203,13 @@ struct gltex {
 	unsigned int cursor_y;
 };
 
+/**
+ * Create an offscreen framebuffer for differential rendering.
+ *
+ * @param gt Renderer instance.
+ *
+ * Returns: 0 on success, -EOPNOTSUPP if blit is unavailable, negative error on failure.
+ */
 static int gltex_create_offscreen(struct gltex *gt)
 {
 	if (!gt->glBlitFramebufferFunc)
@@ -242,6 +249,11 @@ static int gltex_create_offscreen(struct gltex *gt)
 	return 0;
 }
 
+/**
+ * Destroy the offscreen framebuffer and texture if present.
+ *
+ * @param gt Renderer instance.
+ */
 static void gltex_destroy_offscreen(struct gltex *gt)
 {
 	if (gt->offscreen_fbo) {
@@ -1053,6 +1065,17 @@ static int gltex_draw_pointer(struct kmscon_text *txt, unsigned int x, unsigned 
 	// return gltex_draw_pointer_immediate(txt, x, y);
 }
 
+/**
+ * Enable or disable offscreen rendering for the GL renderer.
+ *
+ * Call order:
+ * - update_hw_cursor_all() chooses whether offscreen rendering is needed
+ * - kmscon_text_set_offscreen() forwards to this backend hook
+ * - gltex_create_offscreen()/gltex_destroy_offscreen() manage GPU resources
+ *
+ * @param txt Text renderer instance.
+ * @param enable Whether offscreen rendering should be enabled.
+ */
 static void gltex_set_offscreen(struct kmscon_text *txt, bool enable)
 {
 	struct gltex *gt = txt->data;

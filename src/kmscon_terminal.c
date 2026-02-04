@@ -196,6 +196,10 @@ static inline bool screen_hide_hw_cursor(struct screen *scr);
 /**
  * Enable the hardware cursor on a screen if supported.
  *
+ * Call order matters: update_hw_cursor_all() calls this before
+ * screen_move_hw_cursor() so the cursor buffer and hotspot are ready before
+ * the position is updated.
+ *
  * @param scr Screen to update.
  * @return true if the hardware cursor is enabled and usable.
  */
@@ -243,6 +247,10 @@ static inline bool screen_enable_hw_cursor(struct screen *scr)
 /**
  * Move the hardware cursor on a screen if enabled.
  *
+ * This is called by update_hw_cursor_all() after screen_enable_hw_cursor().
+ * For atomic DRM backends this only updates state; the final commit happens
+ * in uterm_display_flush_cursor().
+ *
  * @param scr Screen to update.
  * @param x Cursor x coordinate in pixels.
  * @param y Cursor y coordinate in pixels.
@@ -285,6 +293,10 @@ static inline bool screen_move_hw_cursor(struct screen *scr, int32_t x, int32_t 
 /**
  * Hide the hardware cursor for a screen.
  *
+ * update_hw_cursor_all() calls this when the pointer is not visible or when
+ * hardware cursor support is dropped. For atomic DRM backends, the actual
+ * disable is committed via uterm_display_flush_cursor().
+ *
  * @param scr Screen to update.
  * @return true if the hardware cursor is hidden or already disabled.
  */
@@ -313,6 +325,15 @@ static inline bool screen_hide_hw_cursor(struct screen *scr)
 
 /**
  * Update hardware cursor visibility and position for all screens.
+ *
+ * Call order:
+ * - decide whether HW cursor is usable for each screen
+ * - enable/move or hide as needed
+ * - toggle offscreen rendering for software fallback
+ * - flush cursor state (uterm_display_flush_cursor)
+ *
+ * This is invoked from pointer_event() on UTERM_SYNC and UTERM_HIDE_TIMEOUT,
+ * so it is safe to coalesce cursor updates until the next input sync.
  *
  * @param term Terminal to update.
  * @return true if a software redraw is required.
@@ -1118,15 +1139,20 @@ static void pointer_event(struct uterm_input *input, struct uterm_input_pointer_
 {
 	struct kmscon_terminal *term = data;
 	unsigned int old_posx, old_posy;
+	unsigned int mouse_mode;
+	unsigned int mouse_event;
 
 	if (!term->opened || !term->awake || !kmscon_session_get_foreground(term->session))
 		return;
 
-	TERM_LOG_DEBUG("pointer event type=%u button=%u pressed=%d wheel=%d x=%d y=%d posx=%u posy=%u visible=%d select=%d mouse_mode=%d",
+	mouse_mode = tsm_vte_get_mouse_mode(term->vte);
+	mouse_event = tsm_vte_get_mouse_event(term->vte);
+
+	TERM_LOG_DEBUG("pointer event type=%u button=%u pressed=%d wheel=%d x=%d y=%d posx=%u posy=%u visible=%d select=%d mouse_mode=%u mouse_event=%u",
 		       ev->event, ev->button, ev->pressed, ev->wheel, term->pointer.x,
 		       term->pointer.y, term->pointer.posx, term->pointer.posy,
 		       term->pointer.visible, term->pointer.select,
-		       tsm_vte_get_mouse_mode(term->vte));
+		       mouse_mode, mouse_event);
 
 	if (ev->event == UTERM_MOVED) {
 		term->pointer.x = ev->pointer_x;
@@ -1151,8 +1177,7 @@ static void pointer_event(struct uterm_input *input, struct uterm_input_pointer_
 			      &term->pointer.posy);
 	}
 
-	if (tsm_vte_get_mouse_mode(term->vte) != TSM_MOUSE_TRACK_DISABLE &&
-	    ev->event != UTERM_SYNC) {
+	if (mouse_event != TSM_MOUSE_TRACK_DISABLE && ev->event != UTERM_SYNC) {
 		forward_pointer_event(term, ev);
 		return;
 	}

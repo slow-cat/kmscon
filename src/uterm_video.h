@@ -184,6 +184,11 @@ bool uterm_display_has_damage(struct uterm_display *disp);
  * @hot_x Hotspot x coordinate within the cursor image.
  * @hot_y Hotspot y coordinate within the cursor image.
  *
+ * Call order:
+ * - uterm_display_set_cursor()
+ * - uterm_display_move_cursor()
+ * - uterm_display_flush_cursor() (atomic backends only)
+ *
  * @return 0 on success, negative error code on failure.
  */
 int uterm_display_set_cursor(struct uterm_display *disp, const uint8_t *argb, int w, int h,
@@ -195,6 +200,11 @@ int uterm_display_set_cursor(struct uterm_display *disp, const uint8_t *argb, in
  * @x Cursor x coordinate in pixels.
  * @y Cursor y coordinate in pixels.
  *
+ * Call order:
+ * - uterm_display_set_cursor()
+ * - uterm_display_move_cursor()
+ * - uterm_display_flush_cursor() (atomic backends only)
+ *
  * @return 0 on success, negative error code on failure.
  */
 int uterm_display_move_cursor(struct uterm_display *disp, int x, int y);
@@ -203,11 +213,24 @@ int uterm_display_move_cursor(struct uterm_display *disp, int x, int y);
  *
  * @disp Display to update.
  *
+ * Call order:
+ * - uterm_display_hide_cursor()
+ * - uterm_display_flush_cursor() (atomic backends only)
+ *
  * @return 0 on success, negative error code on failure.
  */
 int uterm_display_hide_cursor(struct uterm_display *disp);
 /**
  * Flush pending cursor updates to hardware.
+ *
+ * Call order (atomic DRM backends):
+ * - uterm_display_set_cursor()
+ * - uterm_display_move_cursor() / uterm_display_hide_cursor()
+ * - uterm_display_flush_cursor()
+ *
+ * Legacy DRM backends apply cursor changes immediately, so this is a no-op.
+ * The terminal calls this from update_hw_cursor_all() to coalesce cursor state
+ * updates into a single atomic commit per input sync.
  *
  * @disp Display to update.
  *
