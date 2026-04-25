@@ -113,6 +113,11 @@ uterm_dep = [
   eloop_deps,
 ]
 
+if enable_input_libinput
+  uterm_srcs += 'uterm_input_libinput.c'
+  uterm_dep += libinput_deps
+endif
+
 if enable_multi_seat
   uterm_srcs += 'uterm_systemd.c'
   uterm_dep += libsystemd_deps

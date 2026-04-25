@@ -49,6 +49,7 @@ fs = import('fs')
 xkbcommon_deps = dependency('xkbcommon', version: '>=0.5.0')
 libtsm_deps = dependency('libtsm', version: '>=4.4.0')
 libudev_deps = dependency('libudev', version: '>=172')
+libinput_deps = dependency('libinput', disabler: true, required: get_option('input_libinput'))
 dl_deps = dependency('dl')
 threads_deps = dependency('threads')
 
@@ -86,6 +87,7 @@ check_deps = dependency('check', disabler: true, required: get_option('tests'))
 # This will also store the information in a configuration header.
 #
 sections = {
+  'input': 'Input Backends',
   'video': 'Video Backends',
   'font': 'Font Backends',
   'renderer': 'Renderers',
@@ -94,6 +96,7 @@ sections = {
 config = configuration_data()
 # Note: keep this in sync with the dependencies above
 foreach name, reqs : {
+  'input_libinput': [libinput_deps],
   'multi_seat': [libsystemd_deps],
   'video_fbdev': [],
   'video_drm2d': [libdrm_deps],

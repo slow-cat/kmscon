@@ -58,16 +58,22 @@ static void notify_event(struct uterm_input_dev *dev, uint16_t type, uint16_t co
 	case EV_KEY:
 		if (dev->capabilities & UTERM_DEVICE_HAS_KEYS)
 			uxkb_dev_process(dev, value, code);
-		pointer_dev_button(dev, code, value);
+		if (dev->capabilities & (UTERM_DEVICE_HAS_MOUSE_BTN | UTERM_DEVICE_HAS_TOUCH))
+			pointer_dev_button(dev, code, value);
 		break;
 	case EV_REL:
-		pointer_dev_rel(dev, code, value);
+		if (dev->capabilities & (UTERM_DEVICE_HAS_REL | UTERM_DEVICE_HAS_WHEEL))
+			pointer_dev_rel(dev, code, value);
 		break;
 	case EV_ABS:
-		pointer_dev_abs(dev, code, value);
+		if (dev->capabilities & UTERM_DEVICE_HAS_ABS)
+			pointer_dev_abs(dev, code, value);
 		break;
 	case EV_SYN:
-		pointer_dev_sync(dev);
+		if (dev->capabilities &
+		    (UTERM_DEVICE_HAS_REL | UTERM_DEVICE_HAS_ABS | UTERM_DEVICE_HAS_WHEEL |
+		     UTERM_DEVICE_HAS_MOUSE_BTN | UTERM_DEVICE_HAS_TOUCH))
+			pointer_dev_sync(dev);
 		break;
 	}
 }
@@ -354,6 +360,10 @@ int uterm_input_new(struct uterm_input **out, struct ev_eloop *eloop, const char
 	input->repeat_delay = repeat_delay;
 	input->repeat_rate = repeat_rate;
 	shl_dlist_init(&input->devices);
+#ifdef BUILD_ENABLE_INPUT_LIBINPUT
+	shl_dlist_init(&input->libinput_devices);
+	input->pointer_button = BUTTON_NONE;
+#endif
 
 	ret = shl_hook_new(&input->key_hook);
 	if (ret)
@@ -363,10 +373,20 @@ int uterm_input_new(struct uterm_input **out, struct ev_eloop *eloop, const char
 	if (ret)
 		goto err_hook;
 
+#ifdef BUILD_ENABLE_INPUT_LIBINPUT
+	ret = libinput_init(input);
+	if (ret)
+		goto err_hook_pointer;
+#endif
+
 	ret = ev_eloop_new_timer(input->eloop, &input->hide_pointer, NULL, hide_pointer_timer,
 				 input);
 	if (ret)
+#ifdef BUILD_ENABLE_INPUT_LIBINPUT
+		goto err_libinput;
+#else
 		goto err_hook_pointer;
+#endif
 
 	/* xkbcommon won't use the XKB_DEFAULT_OPTIONS environment
 	 * variable if options is an empty string.
@@ -393,6 +413,10 @@ int uterm_input_new(struct uterm_input **out, struct ev_eloop *eloop, const char
 err_hide_timer:
 	ev_eloop_rm_timer(input->hide_pointer);
 
+#ifdef BUILD_ENABLE_INPUT_LIBINPUT
+err_libinput:
+	libinput_destroy(input);
+#endif
 err_hook_pointer:
 	shl_hook_free(input->pointer_hook);
 
@@ -428,7 +452,11 @@ void uterm_input_unref(struct uterm_input *input)
 		input_free_dev(dev);
 	}
 
+#ifdef BUILD_ENABLE_INPUT_LIBINPUT
+	libinput_destroy(input);
+#endif
 	uxkb_desc_destroy(input);
+	shl_hook_free(input->pointer_hook);
 	shl_hook_free(input->key_hook);
 	ev_eloop_unref(input->eloop);
 	free(input);
@@ -517,6 +545,8 @@ SHL_EXPORT
 void uterm_input_add_dev(struct uterm_input *input, const char *node, bool mouse)
 {
 	unsigned int capabilities;
+	unsigned int keyboard_capabilities;
+	unsigned int pointer_mask;
 	int fd;
 	char name[64];
 
@@ -533,6 +563,19 @@ void uterm_input_add_dev(struct uterm_input *input, const char *node, bool mouse
 	capabilities = probe_device_capabilities(fd, input, name);
 
 	close(fd);
+
+	pointer_mask = UTERM_DEVICE_HAS_REL | UTERM_DEVICE_HAS_ABS | UTERM_DEVICE_HAS_MOUSE_BTN |
+		       UTERM_DEVICE_HAS_TOUCH | UTERM_DEVICE_HAS_WHEEL |
+		       UTERM_DEVICE_HAS_DIRECT;
+	keyboard_capabilities = capabilities & ~pointer_mask;
+
+#ifdef BUILD_ENABLE_INPUT_LIBINPUT
+	if (libinput_add_device(input, node, capabilities, mouse)) {
+		if (keyboard_capabilities & UTERM_DEVICE_HAS_KEYS)
+			input_new_dev(input, node, name, keyboard_capabilities);
+		return;
+	}
+#endif
 
 	if (HAS_ALL(capabilities, UTERM_DEVICE_HAS_KEYS)) {
 		input_new_dev(input, node, name, capabilities);
@@ -558,6 +601,10 @@ void uterm_input_remove_dev(struct uterm_input *input, const char *node)
 
 	if (!input || !node)
 		return;
+
+#ifdef BUILD_ENABLE_INPUT_LIBINPUT
+	libinput_remove_device(input, node);
+#endif
 
 	shl_dlist_for_each(iter, &input->devices)
 	{
@@ -627,6 +674,10 @@ void uterm_input_sleep(struct uterm_input *input)
 		dev = shl_dlist_entry(iter, struct uterm_input_dev, list);
 		input_sleep_dev(dev);
 	}
+
+#ifdef BUILD_ENABLE_INPUT_LIBINPUT
+	libinput_sleep(input);
+#endif
 }
 
 SHL_EXPORT
@@ -652,6 +703,10 @@ void uterm_input_wake_up(struct uterm_input *input)
 		if (ret)
 			input_free_dev(dev);
 	}
+
+#ifdef BUILD_ENABLE_INPUT_LIBINPUT
+	libinput_wake_up(input);
+#endif
 }
 
 SHL_EXPORT

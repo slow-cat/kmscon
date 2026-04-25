@@ -10,6 +10,8 @@ option('multi_seat', type: 'feature', value: 'auto',
   description: 'Multi-seat support with systemd or elogind')
 option('elogind', type: 'feature', value: 'disabled',
   description: 'Prefer elogind over systemd')
+option('input_libinput', type: 'feature', value: 'auto',
+  description: 'Use libinput for pointer devices')
 
 # video backends
 option('video_fbdev', type: 'feature', value: 'auto',

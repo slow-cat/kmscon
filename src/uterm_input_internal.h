@@ -33,6 +33,9 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
+#ifdef BUILD_ENABLE_INPUT_LIBINPUT
+#include <libinput.h>
+#endif
 #include "eloop.h"
 #include "shl_dlist.h"
 #include "shl_llog.h"
@@ -107,6 +110,14 @@ struct uterm_input_dev {
 	struct uterm_input_pointer pointer;
 };
 
+#ifdef BUILD_ENABLE_INPUT_LIBINPUT
+struct uterm_input_li_dev {
+	struct shl_dlist list;
+	char *node;
+	struct libinput_device *device;
+};
+#endif
+
 struct uterm_input {
 	unsigned long ref;
 	llog_submit_t llog;
@@ -125,6 +136,18 @@ struct uterm_input {
 	int32_t pointer_max_x;
 	int32_t pointer_max_y;
 	struct ev_timer *hide_pointer;
+
+#ifdef BUILD_ENABLE_INPUT_LIBINPUT
+	struct libinput *libinput;
+	struct ev_fd *libinput_fd;
+	struct shl_dlist libinput_devices;
+	bool libinput_suspended;
+	int32_t pointer_x;
+	int32_t pointer_y;
+	uint8_t pointer_button;
+	struct timespec pointer_last_click;
+	double pointer_scroll_vertical;
+#endif
 
 	struct shl_dlist devices;
 };
@@ -149,5 +172,15 @@ void pointer_dev_rel(struct uterm_input_dev *dev, uint16_t code, int32_t value);
 void pointer_dev_abs(struct uterm_input_dev *dev, uint16_t code, int32_t value);
 void pointer_dev_button(struct uterm_input_dev *dev, uint16_t code, int32_t value);
 void pointer_dev_sync(struct uterm_input_dev *dev);
+
+#ifdef BUILD_ENABLE_INPUT_LIBINPUT
+int libinput_init(struct uterm_input *input);
+void libinput_destroy(struct uterm_input *input);
+bool libinput_add_device(struct uterm_input *input, const char *node, unsigned int capabilities,
+			 bool mouse);
+bool libinput_remove_device(struct uterm_input *input, const char *node);
+int libinput_wake_up(struct uterm_input *input);
+void libinput_sleep(struct uterm_input *input);
+#endif
 
 #endif /* UTERM_INPUT_INTERNAL_H */
