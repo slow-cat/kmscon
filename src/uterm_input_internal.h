@@ -126,6 +126,11 @@ struct uterm_input {
 	int awake;
 	unsigned int repeat_rate;
 	unsigned int repeat_delay;
+	int libinput_accel_speed;
+	int libinput_tap;
+	int libinput_natural_scroll;
+	double libinput_scroll_step_wheel;
+	double libinput_scroll_step_finger;
 
 	struct shl_hook *key_hook;
 	struct xkb_context *ctx;

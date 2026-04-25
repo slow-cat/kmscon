@@ -99,6 +99,7 @@ int main(int argc, char **argv)
 	struct ev_eloop *eloop;
 	struct uterm_vt_master *vtm;
 	struct uterm_input *input;
+	struct uterm_input_config input_conf = {0};
 	struct uterm_vt *vt;
 	size_t onum;
 
@@ -111,7 +112,8 @@ int main(int argc, char **argv)
 	if (ret)
 		goto err_exit;
 
-	ret = uterm_input_new(&input, eloop, "", "", "", "", "C", "", "", 0, 0, 0, log_llog, NULL);
+	ret = uterm_input_new(&input, eloop, "", "", "", "", "C", "", "", 0, &input_conf,
+			      log_llog, NULL);
 	if (ret)
 		goto err_vtm;
 

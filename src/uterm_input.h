@@ -95,10 +95,27 @@ typedef void (*uterm_input_key_cb)(struct uterm_input *input, struct uterm_input
 typedef void (*uterm_input_pointer_cb)(struct uterm_input *input,
 				       struct uterm_input_pointer_event *ev, void *data);
 
+/**
+ * Input backend configuration.
+ *
+ * repeat_* control keyboard repeat timing. libinput_* values tune pointer
+ * devices handled by the libinput backend. For tap and natural scroll, -1
+ * keeps the libinput device default, 0 disables the feature, and 1 enables it.
+ */
+struct uterm_input_config {
+	unsigned int repeat_delay;
+	unsigned int repeat_rate;
+	int libinput_accel_speed;
+	int libinput_tap;
+	int libinput_natural_scroll;
+	unsigned int libinput_scroll_step_wheel;
+	unsigned int libinput_scroll_step_finger;
+};
+
 int uterm_input_new(struct uterm_input **out, struct ev_eloop *eloop, const char *model,
 		    const char *layout, const char *variant, const char *options,
 		    const char *locale, const char *keymap, const char *compose_file,
-		    size_t compose_file_len, unsigned int repeat_delay, unsigned int repeat_rate,
+		    size_t compose_file_len, const struct uterm_input_config *config,
 		    uterm_input_log_t log, void *log_data);
 void uterm_input_ref(struct uterm_input *input);
 void uterm_input_unref(struct uterm_input *input);

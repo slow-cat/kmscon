@@ -101,6 +101,7 @@ struct uterm_display {
 
 	struct shl_hook *hook;
 	int dpms;
+	uint64_t cursor_refresh_interval_usec;
 
 	const struct display_ops *ops;
 	void *data;

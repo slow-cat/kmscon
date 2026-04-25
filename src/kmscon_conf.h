@@ -115,8 +115,20 @@ struct kmscon_conf_t {
 	unsigned int xkb_repeat_delay;
 	/* keyboard key-repeat rate */
 	unsigned int xkb_repeat_rate;
+	/* Maximum redraw and cursor flush rate in Hz */
+	unsigned int redraw_rate;
 	/* Enable mouse support */
 	bool mouse;
+	/* libinput acceleration speed in percent (-100..100) */
+	int libinput_accel_speed;
+	/* libinput tap setting (-1=default, 0=off, 1=on) */
+	int libinput_tap;
+	/* libinput natural scroll setting (-1=default, 0=off, 1=on) */
+	int libinput_natural_scroll;
+	/* libinput wheel scroll step in logical units */
+	unsigned int libinput_scroll_step_wheel;
+	/* libinput finger scroll step in logical units */
+	unsigned int libinput_scroll_step_finger;
 	/* DPMS screen timeout in seconds (0 = disabled) */
 	unsigned int dpms_timeout;
 

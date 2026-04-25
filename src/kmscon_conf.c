@@ -115,8 +115,24 @@ static void print_help()
 		"\t                                 Initial delay for key-repeat in ms\n"
 		"\t    --xkb-repeat-rate <msecs>  [50]\n"
 		"\t                                 Delay between two key repeats in ms\n"
+		"\t    --redraw-rate <hz>         [60]\n"
+		"\t                                 Limit redraw and hardware cursor\n"
+		"\t                                 updates to this rate\n"
 		"\t    --mouse                    [on]\n"
 		"\t                                 Enable mouse support\n"
+		"\t    --libinput-accel-speed <%%> [0]\n"
+		"\t                                 Pointer acceleration speed in\n"
+		"\t                                 percent (-100..100)\n"
+		"\t    --libinput-tap <mode>      [-1]\n"
+		"\t                                 libinput tap: -1=default, 0=off,\n"
+		"\t                                 1=on\n"
+		"\t    --libinput-natural-scroll <mode> [-1]\n"
+		"\t                                 libinput natural scroll:\n"
+		"\t                                 -1=default, 0=off, 1=on\n"
+		"\t    --libinput-scroll-step-wheel <units> [15]\n"
+		"\t                                 Wheel scroll delta per logical step\n"
+		"\t    --libinput-scroll-step-finger <units> [1]\n"
+		"\t                                 Finger scroll delta per logical step\n"
 		"\t    --dpms-timeout <secs>      [0]\n"
 		"\t                                 Screen timeout in seconds (0=off)\n"
 		"\n"
@@ -768,7 +784,16 @@ int kmscon_conf_new(struct conf_ctx **out)
 		CONF_OPTION_STRING(0, "xkb-compose-file", &conf->xkb_compose_file, ""),
 		CONF_OPTION_UINT(0, "xkb-repeat-delay", &conf->xkb_repeat_delay, 250),
 		CONF_OPTION_UINT(0, "xkb-repeat-rate", &conf->xkb_repeat_rate, 50),
+		CONF_OPTION_UINT(0, "redraw-rate", &conf->redraw_rate, 60),
 		CONF_OPTION_BOOL(0, "mouse", &conf->mouse, true),
+		CONF_OPTION_INT(0, "libinput-accel-speed", &conf->libinput_accel_speed, 0),
+		CONF_OPTION_INT(0, "libinput-tap", &conf->libinput_tap, -1),
+		CONF_OPTION_INT(0, "libinput-natural-scroll", &conf->libinput_natural_scroll,
+				-1),
+		CONF_OPTION_UINT(0, "libinput-scroll-step-wheel",
+				 &conf->libinput_scroll_step_wheel, 15),
+		CONF_OPTION_UINT(0, "libinput-scroll-step-finger",
+				 &conf->libinput_scroll_step_finger, 1),
 		CONF_OPTION_UINT(0, "dpms-timeout", &conf->dpms_timeout, 0),
 
 		/* Grabs / Keyboard-Shortcuts */

@@ -166,6 +166,14 @@ int uterm_display_use(struct uterm_display *disp);
 int uterm_display_swap(struct uterm_display *disp);
 bool uterm_display_is_swapping(struct uterm_display *disp);
 bool uterm_display_need_redraw(struct uterm_display *disp);
+/**
+ * Configure the maximum hardware cursor flush rate for a display.
+ *
+ * @disp Display to update.
+ * @hz Maximum cursor update rate in Hertz. Values outside 1..1000 fall back
+ * to the built-in default.
+ */
+void uterm_display_set_cursor_refresh_rate(struct uterm_display *disp, unsigned int hz);
 
 int uterm_display_fill(struct uterm_display *disp, uint8_t r, uint8_t g, uint8_t b, unsigned int x,
 		       unsigned int y, unsigned int width, unsigned int height);

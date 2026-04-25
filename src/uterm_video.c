@@ -47,8 +47,17 @@
 #include "uterm_video_internal.h"
 
 #define LOG_SUBSYSTEM "video"
+#define UTERM_DEFAULT_CURSOR_REFRESH_RATE 60U
 
 static struct shl_register video_reg = SHL_REGISTER_INIT(video_reg);
+
+static uint64_t uterm_cursor_refresh_interval_from_hz(unsigned int hz)
+{
+	if (!hz || hz > 1000)
+		hz = UTERM_DEFAULT_CURSOR_REFRESH_RATE;
+
+	return 1000000ULL / hz;
+}
 
 static inline void uterm_video_destroy(void *data)
 {
@@ -92,6 +101,8 @@ int display_new(struct uterm_display **out, const struct display_ops *ops,
 	disp->ops = ops;
 	log_info("new display %s %p", disp->name, disp);
 	disp->video = video;
+	disp->cursor_refresh_interval_usec =
+		uterm_cursor_refresh_interval_from_hz(UTERM_DEFAULT_CURSOR_REFRESH_RATE);
 
 	ret = shl_hook_new(&disp->hook);
 	if (ret)
@@ -331,6 +342,15 @@ bool uterm_display_need_redraw(struct uterm_display *disp)
 		return false;
 
 	return VIDEO_CALL(disp->ops->need_redraw, 0, disp);
+}
+
+SHL_EXPORT
+void uterm_display_set_cursor_refresh_rate(struct uterm_display *disp, unsigned int hz)
+{
+	if (!disp)
+		return;
+
+	disp->cursor_refresh_interval_usec = uterm_cursor_refresh_interval_from_hz(hz);
 }
 
 SHL_EXPORT

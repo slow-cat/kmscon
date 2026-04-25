@@ -47,7 +47,6 @@
 #include "uterm_video_internal.h"
 
 #define LOG_SUBSYSTEM "drm_shared"
-#define DRM_CURSOR_COMMIT_INTERVAL_USEC 16666
 
 static void drm_cursor_free_buffer(int fd, struct uterm_drm_display *ddrm);
 
@@ -1141,7 +1140,8 @@ int uterm_drm_display_hide_cursor(struct uterm_display *disp)
  *
  * This function is typically called once per input sync from
  * update_hw_cursor_all() to avoid competing atomic commits. Commits are
- * rate-limited to ~60Hz to reduce CPU overhead from frequent cursor moves.
+ * rate-limited to the configured cursor refresh rate to reduce CPU overhead
+ * from frequent cursor moves.
  *
  * @disp Display to update.
  *
@@ -1178,7 +1178,7 @@ int uterm_drm_display_flush_cursor(struct uterm_display *disp)
 		uint64_t now = drm_now_usec();
 
 		if (now >= ddrm->cursor_last_commit_usec &&
-		    now - ddrm->cursor_last_commit_usec < DRM_CURSOR_COMMIT_INTERVAL_USEC)
+		    now - ddrm->cursor_last_commit_usec < disp->cursor_refresh_interval_usec)
 			return -EBUSY;
 	}
 

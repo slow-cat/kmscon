@@ -130,10 +130,20 @@ static void monitor_event(struct uterm_monitor *mon, struct uterm_monitor_event 
 					  input_conf.xkb_compose_file, ret);
 		}
 
+		struct uterm_input_config uconfig = {
+			.repeat_delay = 0,
+			.repeat_rate = 0,
+			.libinput_accel_speed = 0,
+			.libinput_tap = -1,
+			.libinput_natural_scroll = -1,
+			.libinput_scroll_step_wheel = 0,
+			.libinput_scroll_step_finger = 0,
+		};
+
 		ret = uterm_input_new(&input, eloop, input_conf.xkb_model, input_conf.xkb_layout,
 				      input_conf.xkb_variant, input_conf.xkb_options,
-				      input_conf.locale, keymap, compose_file, compose_file_len, 0,
-				      0, log_llog, NULL);
+				      input_conf.locale, keymap, compose_file, compose_file_len,
+				      &uconfig, log_llog, NULL);
 		if (ret)
 			return;
 		ret = uterm_input_register_key_cb(input, input_arrived, NULL);

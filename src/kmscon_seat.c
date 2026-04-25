@@ -759,6 +759,7 @@ int kmscon_seat_new(struct kmscon_seat **out, struct conf_ctx *main_conf, struct
 		    kmscon_seat_cb_t cb, void *data)
 {
 	struct kmscon_seat *seat;
+	struct uterm_input_config input_conf;
 	int ret;
 	const char *locale;
 	char *keymap, *compose_file;
@@ -819,11 +820,19 @@ int kmscon_seat_new(struct kmscon_seat **out, struct conf_ctx *main_conf, struct
 				  ret);
 	}
 
+	memset(&input_conf, 0, sizeof(input_conf));
+	input_conf.repeat_delay = seat->conf->xkb_repeat_delay;
+	input_conf.repeat_rate = seat->conf->xkb_repeat_rate;
+	input_conf.libinput_accel_speed = seat->conf->libinput_accel_speed;
+	input_conf.libinput_tap = seat->conf->libinput_tap;
+	input_conf.libinput_natural_scroll = seat->conf->libinput_natural_scroll;
+	input_conf.libinput_scroll_step_wheel = seat->conf->libinput_scroll_step_wheel;
+	input_conf.libinput_scroll_step_finger = seat->conf->libinput_scroll_step_finger;
+
 	ret = uterm_input_new(&seat->input, seat->eloop, seat->conf->xkb_model,
 			      seat->conf->xkb_layout, seat->conf->xkb_variant,
 			      seat->conf->xkb_options, locale, keymap, compose_file,
-			      compose_file_len, seat->conf->xkb_repeat_delay,
-			      seat->conf->xkb_repeat_rate, log_llog, NULL);
+			      compose_file_len, &input_conf, log_llog, NULL);
 	free(keymap);
 
 	if (ret)

@@ -56,6 +56,7 @@
 #define KMSCON_CURSOR_H 64
 #define KMSCON_CURSOR_HOT_X 1
 #define KMSCON_CURSOR_HOT_Y 1
+#define KMSCON_DEFAULT_REDRAW_RATE 60U
 
 static FILE *terminal_log_file;
 static int terminal_log_users;
@@ -167,11 +168,26 @@ struct kmscon_terminal {
 	struct ev_timer *redraw_timer;
 	const char *redraw_reason;
 	unsigned long redraw_seq;
+	uint64_t redraw_interval_nsec;
 
 	struct kmscon_pointer pointer;
 };
 
 static int font_set(struct kmscon_terminal *term);
+
+static unsigned int sanitize_redraw_rate(unsigned int hz)
+{
+	if (!hz || hz > 1000)
+		return KMSCON_DEFAULT_REDRAW_RATE;
+
+	return hz;
+}
+
+static uint64_t redraw_interval_from_hz(unsigned int hz)
+{
+	hz = sanitize_redraw_rate(hz);
+	return 1000000000ULL / hz;
+}
 
 static void coord_to_cell(struct kmscon_terminal *term, int32_t x, int32_t y, unsigned int *posx,
 			  unsigned int *posy)
@@ -524,6 +540,9 @@ static void redraw_timer_cb(struct ev_timer *timer, uint64_t exp, void *data)
 static void schedule_redraw_with_reason(struct kmscon_terminal *term, const char *reason)
 {
 	struct itimerspec spec;
+	long interval_nsec;
+
+	interval_nsec = (long)term->redraw_interval_nsec;
 
 	if (!term->awake) {
 		TERM_LOG_DEBUG("redraw schedule skip: not awake reason=%s", reason);
@@ -537,9 +556,9 @@ static void schedule_redraw_with_reason(struct kmscon_terminal *term, const char
 		if (!term->redraw_scheduled) {
 			term->redraw_scheduled = true;
 
-			/* Schedule redraw after 16.6ms (60Hz) */
+			/* Schedule redraw after the configured refresh interval. */
 			spec.it_value.tv_sec = 0;
-			spec.it_value.tv_nsec = 16666666; /* 16.6ms */
+			spec.it_value.tv_nsec = interval_nsec;
 			spec.it_interval.tv_sec = 0;
 			spec.it_interval.tv_nsec = 0;
 
@@ -561,9 +580,9 @@ static void schedule_redraw_with_reason(struct kmscon_terminal *term, const char
 	if (!term->redraw_scheduled) {
 		term->redraw_scheduled = true;
 
-		/* Schedule redraw after 16.6ms (60Hz) */
+		/* Schedule redraw after the configured refresh interval. */
 		spec.it_value.tv_sec = 0;
-		spec.it_value.tv_nsec = 16666666; /* 16.6ms */
+		spec.it_value.tv_nsec = interval_nsec;
 		spec.it_interval.tv_sec = 0;
 		spec.it_interval.tv_nsec = 0;
 
@@ -852,6 +871,7 @@ static int add_display(struct kmscon_terminal *term, struct uterm_display *disp)
 	memset(scr, 0, sizeof(*scr));
 	scr->term = term;
 	scr->disp = disp;
+	uterm_display_set_cursor_refresh_rate(scr->disp, term->conf->redraw_rate);
 
 	ret = uterm_display_register_cb(scr->disp, display_event, scr);
 	if (ret) {
@@ -1380,6 +1400,7 @@ int kmscon_terminal_register(struct kmscon_session **out, struct kmscon_seat *se
 
 	term->conf_ctx = kmscon_seat_get_conf(seat);
 	term->conf = conf_ctx_get_mem(term->conf_ctx);
+	term->redraw_interval_nsec = redraw_interval_from_hz(term->conf->redraw_rate);
 
 	strncpy(term->font_attr.name, term->conf->font_name, KMSCON_FONT_MAX_NAME - 1);
 	term->font_attr.ppi = term->conf->font_ppi;

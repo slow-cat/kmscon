@@ -11,8 +11,7 @@
 #include "uterm_input.h"
 #include "uterm_input_internal.h"
 
-#define LIBINPUT_SCROLL_STEP_WHEEL 15.0
-#define LIBINPUT_SCROLL_STEP_FINGER 1.0
+#define LIBINPUT_WHEEL_NOTCH_UNITS 15.0
 
 static int libinput_open_restricted(const char *path, int flags, void *data)
 {
@@ -39,6 +38,75 @@ static bool input_has_pointer_caps(unsigned int capabilities)
 		(UTERM_DEVICE_HAS_ABS | UTERM_DEVICE_HAS_TOUCH)) ||
 	       ((capabilities & (UTERM_DEVICE_HAS_ABS | UTERM_DEVICE_HAS_MOUSE_BTN)) ==
 		(UTERM_DEVICE_HAS_ABS | UTERM_DEVICE_HAS_MOUSE_BTN));
+}
+
+static const char *libinput_node_basename(const char *node)
+{
+	const char *base;
+
+	if (!node)
+		return NULL;
+
+	base = strrchr(node, '/');
+	return base ? base + 1 : node;
+}
+
+static enum libinput_config_status libinput_apply_tap_config(struct libinput_device *device,
+							     int tap_mode)
+{
+	if (tap_mode < 0 || libinput_device_config_tap_get_finger_count(device) == 0)
+		return LIBINPUT_CONFIG_STATUS_SUCCESS;
+
+	return libinput_device_config_tap_set_enabled(
+		device, tap_mode ? LIBINPUT_CONFIG_TAP_ENABLED : LIBINPUT_CONFIG_TAP_DISABLED);
+}
+
+static enum libinput_config_status
+libinput_apply_natural_scroll_config(struct libinput_device *device, int natural_scroll_mode)
+{
+	if (natural_scroll_mode < 0 ||
+	    !libinput_device_config_scroll_has_natural_scroll(device))
+		return LIBINPUT_CONFIG_STATUS_SUCCESS;
+
+	return libinput_device_config_scroll_set_natural_scroll_enabled(device,
+									 natural_scroll_mode);
+}
+
+static void libinput_configure_device(struct uterm_input *input, struct libinput_device *device)
+{
+	enum libinput_config_status ret;
+	int natural_supported;
+	int natural_enabled;
+
+	if (!device)
+		return;
+
+	if (libinput_device_config_accel_is_available(device)) {
+		ret = libinput_device_config_accel_set_speed(device,
+						      input->libinput_accel_speed / 100.0);
+		if (ret != LIBINPUT_CONFIG_STATUS_SUCCESS)
+			llog_warn(input, "cannot set libinput accel on %s (%d)",
+				  libinput_device_get_name(device), ret);
+	}
+
+	ret = libinput_apply_tap_config(device, input->libinput_tap);
+	if (ret != LIBINPUT_CONFIG_STATUS_SUCCESS)
+		llog_warn(input, "cannot set libinput tap on %s (%d)",
+			  libinput_device_get_name(device), ret);
+
+	natural_supported = libinput_device_config_scroll_has_natural_scroll(device);
+	ret = libinput_apply_natural_scroll_config(device, input->libinput_natural_scroll);
+	if (ret != LIBINPUT_CONFIG_STATUS_SUCCESS)
+		llog_warn(input, "cannot set natural scroll on %s (%d)",
+			  libinput_device_get_name(device), ret);
+	natural_enabled = natural_supported ?
+		libinput_device_config_scroll_get_natural_scroll_enabled(device) : 0;
+	llog_debug(input,
+		   "libinput config device=%s accel=%d tap=%d natural_req=%d natural_supported=%d natural_enabled=%d wheel_step=%.2f finger_step=%.2f",
+		   libinput_device_get_name(device), input->libinput_accel_speed,
+		   input->libinput_tap, input->libinput_natural_scroll, natural_supported,
+		   natural_enabled, input->libinput_scroll_step_wheel,
+		   input->libinput_scroll_step_finger);
 }
 
 static uint8_t libinput_map_button(uint32_t button)
@@ -136,6 +204,17 @@ static void libinput_emit_wheel(struct uterm_input *input, int32_t wheel)
 	libinput_send_pointer_event(input, &event);
 }
 
+static double libinput_scroll_to_uterm(double value)
+{
+	/*
+	 * libinput defines positive vertical scroll values as "down".
+	 * kmscon's existing UTERM_WHEEL convention uses positive values for
+	 * scroll-up. Convert once at the backend boundary and leave natural
+	 * scroll entirely to libinput device configuration.
+	 */
+	return -value;
+}
+
 static void libinput_emit_scroll_steps(struct uterm_input *input, double step)
 {
 	while (input->pointer_scroll_vertical >= step) {
@@ -196,18 +275,20 @@ static void libinput_handle_scroll(struct uterm_input *input, enum libinput_even
 
 	switch (type) {
 	case LIBINPUT_EVENT_POINTER_SCROLL_WHEEL:
-		step = LIBINPUT_SCROLL_STEP_WHEEL;
+		step = input->libinput_scroll_step_wheel;
 		input->pointer_scroll_vertical +=
-			-libinput_event_pointer_get_scroll_value_v120(
-				 event, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL) /
-			120.0 * LIBINPUT_SCROLL_STEP_WHEEL;
+			libinput_scroll_to_uterm(
+				libinput_event_pointer_get_scroll_value_v120(
+					event, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL)) /
+			120.0 * LIBINPUT_WHEEL_NOTCH_UNITS;
 		break;
 	case LIBINPUT_EVENT_POINTER_SCROLL_FINGER:
 	case LIBINPUT_EVENT_POINTER_SCROLL_CONTINUOUS:
-		step = LIBINPUT_SCROLL_STEP_FINGER;
+		step = input->libinput_scroll_step_finger;
 		input->pointer_scroll_vertical +=
-			-libinput_event_pointer_get_scroll_value(
-				event, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+			libinput_scroll_to_uterm(
+				libinput_event_pointer_get_scroll_value(
+					event, LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL));
 		break;
 	default:
 		return;
@@ -235,6 +316,34 @@ static void libinput_remove_stored_device(struct uterm_input *input, struct libi
 	}
 }
 
+static void libinput_refresh_stored_device(struct uterm_input *input, struct libinput_device *device)
+{
+	struct shl_dlist *iter;
+	struct uterm_input_li_dev *entry;
+	const char *sysname;
+
+	if (!input || !device)
+		return;
+
+	sysname = libinput_device_get_sysname(device);
+	if (!sysname)
+		return;
+
+	shl_dlist_for_each(iter, &input->libinput_devices)
+	{
+		entry = shl_dlist_entry(iter, struct uterm_input_li_dev, list);
+		if (strcmp(libinput_node_basename(entry->node), sysname))
+			continue;
+
+		if (entry->device == device)
+			return;
+
+		libinput_device_unref(entry->device);
+		entry->device = libinput_device_ref(device);
+		return;
+	}
+}
+
 static void libinput_dispatch_events(struct uterm_input *input)
 {
 	struct libinput_event *event;
@@ -248,26 +357,37 @@ static void libinput_dispatch_events(struct uterm_input *input)
 
 	while ((event = libinput_get_event(input->libinput))) {
 		enum libinput_event_type type = libinput_event_get_type(event);
-		struct libinput_event_pointer *pev = libinput_event_get_pointer_event(event);
 
 		switch (type) {
-		case LIBINPUT_EVENT_POINTER_MOTION:
+		case LIBINPUT_EVENT_POINTER_MOTION: {
+			struct libinput_event_pointer *pev = libinput_event_get_pointer_event(event);
 			libinput_handle_motion(input, pev);
 			need_sync = true;
 			break;
-		case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE:
+		}
+		case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE: {
+			struct libinput_event_pointer *pev = libinput_event_get_pointer_event(event);
 			libinput_handle_absolute_motion(input, pev);
 			need_sync = true;
 			break;
-		case LIBINPUT_EVENT_POINTER_BUTTON:
+		}
+		case LIBINPUT_EVENT_POINTER_BUTTON: {
+			struct libinput_event_pointer *pev = libinput_event_get_pointer_event(event);
 			libinput_handle_button(input, pev);
 			need_sync = true;
 			break;
+		}
 		case LIBINPUT_EVENT_POINTER_SCROLL_WHEEL:
 		case LIBINPUT_EVENT_POINTER_SCROLL_FINGER:
-		case LIBINPUT_EVENT_POINTER_SCROLL_CONTINUOUS:
+		case LIBINPUT_EVENT_POINTER_SCROLL_CONTINUOUS: {
+			struct libinput_event_pointer *pev = libinput_event_get_pointer_event(event);
 			libinput_handle_scroll(input, type, pev);
 			need_sync = true;
+			break;
+		}
+		case LIBINPUT_EVENT_DEVICE_ADDED:
+			libinput_refresh_stored_device(input, libinput_event_get_device(event));
+			libinput_configure_device(input, libinput_event_get_device(event));
 			break;
 		case LIBINPUT_EVENT_DEVICE_REMOVED:
 			libinput_remove_stored_device(input, libinput_event_get_device(event));
@@ -372,6 +492,8 @@ bool libinput_add_device(struct uterm_input *input, const char *node, unsigned i
 	device = libinput_path_add_device(input->libinput, node);
 	if (!device)
 		return false;
+
+	libinput_configure_device(input, device);
 
 	entry = malloc(sizeof(*entry));
 	if (!entry) {

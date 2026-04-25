@@ -327,27 +327,57 @@ static void hide_pointer_timer(struct ev_timer *timer, uint64_t num, void *data)
 	shl_hook_call(input->pointer_hook, input, &pev);
 }
 
+static unsigned int sanitize_repeat_delay(unsigned int repeat_delay)
+{
+	if (!repeat_delay)
+		return 250;
+	if (repeat_delay >= 1000)
+		return 999;
+	return repeat_delay;
+}
+
+static unsigned int sanitize_repeat_rate(unsigned int repeat_rate)
+{
+	if (!repeat_rate)
+		return 50;
+	if (repeat_rate >= 1000)
+		return 999;
+	return repeat_rate;
+}
+
+static int sanitize_libinput_switch(int value)
+{
+	if (value < -1)
+		return -1;
+	if (value > 1)
+		return 1;
+	return value;
+}
+
+static double sanitize_scroll_step(unsigned int step, double fallback)
+{
+	if (!step)
+		return fallback;
+	return (double)step;
+}
+
 SHL_EXPORT
 int uterm_input_new(struct uterm_input **out, struct ev_eloop *eloop, const char *model,
 		    const char *layout, const char *variant, const char *options,
 		    const char *locale, const char *keymap, const char *compose_file,
-		    size_t compose_file_len, unsigned int repeat_delay, unsigned int repeat_rate,
+		    size_t compose_file_len, const struct uterm_input_config *config,
 		    uterm_input_log_t log, void *log_data)
 {
 	struct uterm_input *input;
+	unsigned int repeat_delay;
+	unsigned int repeat_rate;
 	int ret;
 
 	if (!out || !eloop)
 		return -EINVAL;
 
-	if (!repeat_delay)
-		repeat_delay = 250;
-	if (repeat_delay >= 1000)
-		repeat_delay = 999;
-	if (!repeat_rate)
-		repeat_rate = 50;
-	if (repeat_rate >= 1000)
-		repeat_rate = 999;
+	repeat_delay = sanitize_repeat_delay(config ? config->repeat_delay : 0);
+	repeat_rate = sanitize_repeat_rate(config ? config->repeat_rate : 0);
 
 	input = malloc(sizeof(*input));
 	if (!input)
@@ -359,6 +389,18 @@ int uterm_input_new(struct uterm_input **out, struct ev_eloop *eloop, const char
 	input->eloop = eloop;
 	input->repeat_delay = repeat_delay;
 	input->repeat_rate = repeat_rate;
+	input->libinput_accel_speed = config ? config->libinput_accel_speed : 0;
+	if (input->libinput_accel_speed < -100)
+		input->libinput_accel_speed = -100;
+	else if (input->libinput_accel_speed > 100)
+		input->libinput_accel_speed = 100;
+	input->libinput_tap = sanitize_libinput_switch(config ? config->libinput_tap : -1);
+	input->libinput_natural_scroll =
+		sanitize_libinput_switch(config ? config->libinput_natural_scroll : -1);
+	input->libinput_scroll_step_wheel =
+		sanitize_scroll_step(config ? config->libinput_scroll_step_wheel : 0, 15.0);
+	input->libinput_scroll_step_finger =
+		sanitize_scroll_step(config ? config->libinput_scroll_step_finger : 0, 1.0);
 	shl_dlist_init(&input->devices);
 #ifdef BUILD_ENABLE_INPUT_LIBINPUT
 	shl_dlist_init(&input->libinput_devices);
